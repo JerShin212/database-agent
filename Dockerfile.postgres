@@ -1,0 +1,13 @@
+# Dockerfile for PostgreSQL with VectorChord
+# VectorChord already includes all we need for hybrid search
+# We'll use PostgreSQL's built-in Full-Text Search for keyword search
+
+FROM ghcr.io/tensorchord/vchord-postgres:pg17-v1.0.0
+
+# VectorChord image already has everything we need:
+# - PostgreSQL 17 with pgvector
+# - VectorChord extension for fast vector search
+# - Full-Text Search is built into PostgreSQL
+
+# No additional extensions needed - we'll use PostgreSQL's native FTS
+# with custom BM25-like scoring function defined in the migration SQL

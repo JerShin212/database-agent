@@ -42,8 +42,9 @@ CREATE TABLE IF NOT EXISTS document_chunks (
 );
 
 -- Index for vector similarity search (VectorChord)
+-- Using cosine similarity (better for normalized embeddings like OpenAI)
 CREATE INDEX IF NOT EXISTS document_chunks_embedding_idx
-ON document_chunks USING vchordrq (embedding vector_l2_ops);
+ON document_chunks USING vchordrq (embedding vector_cosine_ops);
 
 -- Conversations table
 CREATE TABLE IF NOT EXISTS conversations (

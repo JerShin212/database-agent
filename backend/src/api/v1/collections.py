@@ -300,11 +300,18 @@ async def search_documents(
     request: SearchRequest,
     db: AsyncSession = Depends(get_db),
 ):
-    """Search documents using semantic search."""
+    """Search documents using hybrid, semantic, or keyword search.
+
+    Search modes:
+    - hybrid: Combines BM25 keyword search and semantic search with RRF (default)
+    - semantic: Cosine similarity semantic search only
+    - keyword: BM25 keyword search only
+    """
     search_service = SearchService(db)
     results = await search_service.search(
         query=request.query,
         collection_ids=request.collection_ids,
         limit=request.limit,
+        mode=request.mode,
     )
     return results

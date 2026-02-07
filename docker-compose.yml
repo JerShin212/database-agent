@@ -1,7 +1,9 @@
 services:
-  # PostgreSQL with VectorChord for embeddings
+  # PostgreSQL with VectorChord for embeddings + ParadeDB pg_search for BM25
   postgres:
-    image: ghcr.io/tensorchord/vchord-postgres:pg17-v1.0.0
+    build:
+      context: .
+      dockerfile: Dockerfile.postgres
     container_name: db-agent-postgres
     environment:
       POSTGRES_USER: postgres
@@ -56,7 +58,7 @@ services:
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - SQLITE_DATA_PATH=/app/data/sqlite
     ports:
-      - "8001:8000"
+      - "8001:8001"
     volumes:
       - ./backend/src:/app/src
       - sqlite_data:/app/data/sqlite

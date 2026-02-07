@@ -50,6 +50,7 @@ class SearchRequest(BaseModel):
     query: str
     collection_ids: Optional[list[UUID]] = None
     limit: int = 5
+    mode: str = "hybrid"  # "hybrid", "semantic", or "keyword"
 
 
 class SearchResult(BaseModel):

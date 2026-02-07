@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react'
 import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import { User, Bot, Wrench } from 'lucide-react'
 import type { Message, ToolCall } from '../../types'
 import { useChatStore } from '../../stores/chatStore'
@@ -65,7 +66,7 @@ export default function MessageList({
                 <Bot size={18} className="text-blue-600" />
               </div>
               <div className="flex-1 bg-white rounded-lg p-4 shadow-sm">
-                <ReactMarkdown className="prose prose-sm max-w-none">
+                <ReactMarkdown className="prose prose-sm max-w-none" remarkPlugins={[remarkGfm]}>
                   {streamingContent}
                 </ReactMarkdown>
                 <span className="inline-block w-2 h-4 bg-blue-500 animate-pulse ml-1" />
@@ -113,7 +114,7 @@ function MessageBubble({ message }: { message: Message }) {
           {isUser ? (
             <p className="whitespace-pre-wrap">{message.content}</p>
           ) : (
-            <ReactMarkdown className="prose prose-sm max-w-none">
+            <ReactMarkdown className="prose prose-sm max-w-none" remarkPlugins={[remarkGfm]}>
               {message.content}
             </ReactMarkdown>
           )}

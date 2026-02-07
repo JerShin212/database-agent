@@ -73,3 +73,5 @@ htmlcov/
 # uv
 .uv/
 **/__pycache__/
+
+/docs
