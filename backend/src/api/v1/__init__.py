@@ -1,3 +1,3 @@
-from src.api.v1 import chat, collections, databases
+from src.api.v1 import chat, collections, connectors, databases, schema
 
-__all__ = ["chat", "collections", "databases"]
+__all__ = ["chat", "collections", "connectors", "databases", "schema"]

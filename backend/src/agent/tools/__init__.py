@@ -8,6 +8,9 @@ from src.agent.tools.search_tools import (
     search_collections,
     list_collections,
 )
+from src.agent.tools.schema_tools import (
+    search_schema_catalog,
+)
 from src.agent.tools.context import ToolContext, set_tool_context, get_tool_context
 
 __all__ = [
@@ -17,6 +20,7 @@ __all__ = [
     "get_table_info",
     "search_collections",
     "list_collections",
+    "search_schema_catalog",
     "ToolContext",
     "set_tool_context",
     "get_tool_context",

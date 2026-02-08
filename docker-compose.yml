@@ -56,6 +56,7 @@ services:
       - MINIO_SECURE=false
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY}
       - SQLITE_DATA_PATH=/app/data/sqlite
     ports:
       - "8001:8001"

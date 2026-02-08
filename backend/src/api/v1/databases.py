@@ -13,7 +13,10 @@ from src.schemas.database import (
     QueryResponse,
 )
 from src.models.database import SQLiteDatabase
+from src.models.user import User
+from src.services.connector_service import ConnectorService
 from src.services.sqlite_service import sqlite_service
+from src.workers.schema_indexer import schema_indexer
 
 router = APIRouter()
 
@@ -49,6 +52,32 @@ async def create_sample_database_endpoint(
     db.add(database)
     await db.commit()
     await db.refresh(database)
+
+    # Automatically create a connector and trigger semantic indexing
+    try:
+        # Get default user
+        result = await db.execute(select(User).where(User.username == "default"))
+        default_user = result.scalar_one_or_none()
+
+        if default_user:
+            # Create connector for the SQLite database
+            connector_service = ConnectorService(db)
+            connection_string = f"sqlite:///{full_path}"
+
+            connector = await connector_service.create_connector(
+                user_id=default_user.id,
+                name=f"{data.name} (Semantic Catalog)",
+                db_type="sqlite",
+                connection_string=connection_string,
+            )
+
+            # Trigger schema indexing in the background
+            # Note: This runs synchronously but updates status in DB
+            await schema_indexer.index_connector_schema(db, connector.id)
+
+    except Exception as e:
+        # Log error but don't fail database creation
+        print(f"Warning: Failed to create connector for sample database: {e}")
 
     return database
 

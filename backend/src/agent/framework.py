@@ -5,6 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.config import settings
+from src.models.connector import Connector
 from src.models.conversation import Conversation, Message
 from src.models.database import SQLiteDatabase
 from src.services.sqlite_service import sqlite_service
@@ -16,6 +17,7 @@ from src.agent.tools import (
     get_table_info,
     search_collections,
     list_collections,
+    search_schema_catalog,
     ToolContext,
     set_tool_context,
 )
@@ -26,6 +28,7 @@ class DatabaseAgentFramework:
 
     def __init__(self):
         self.tools = [
+            search_schema_catalog,
             execute_sql_query,
             get_database_schema,
             list_tables,
@@ -78,6 +81,8 @@ class DatabaseAgentFramework:
         # Pre-fetch database path for tools (avoids async issues in sync tools)
         db_path = None
         db_name = None
+        connector_id = None
+
         if database_id:
             result = await db.execute(
                 select(SQLiteDatabase).where(SQLiteDatabase.id == database_id)
@@ -86,6 +91,18 @@ class DatabaseAgentFramework:
             if sqlite_db:
                 db_path = sqlite_service.get_db_path(sqlite_db.id, sqlite_db.file_path)
                 db_name = sqlite_db.name
+
+                # Look up connector for this database (if it has one)
+                # Match by name pattern: "{db_name} (Semantic Catalog)"
+                result = await db.execute(
+                    select(Connector).where(
+                        Connector.name == f"{db_name} (Semantic Catalog)",
+                        Connector.status == "ready"
+                    )
+                )
+                connector = result.scalar_one_or_none()
+                if connector:
+                    connector_id = connector.id
         else:
             # Get first active database
             result = await db.execute(
@@ -97,12 +114,25 @@ class DatabaseAgentFramework:
                 db_path = sqlite_service.get_db_path(sqlite_db.id, sqlite_db.file_path)
                 db_name = sqlite_db.name
 
+                # Look up connector for this database
+                # Match by name pattern
+                result = await db.execute(
+                    select(Connector).where(
+                        Connector.name == f"{db_name} (Semantic Catalog)",
+                        Connector.status == "ready"
+                    )
+                )
+                connector = result.scalar_one_or_none()
+                if connector:
+                    connector_id = connector.id
+
         # Set tool context for this request
         context = ToolContext(
             db=db,
             database_id=database_id,
             database_path=db_path,
             database_name=db_name,
+            connector_id=connector_id,
             collection_ids=collection_ids,
         )
         set_tool_context(context)

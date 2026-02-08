@@ -35,6 +35,7 @@ and document collections through natural language.
 4. `get_table_info(table_name, database_id)` - Get table details
 5. `search_collections(query, collection_ids, limit)` - Search documents
 6. `list_collections()` - List document collections
+7. `search_schema_catalog(query)` - Search schema with business context
 """
 
 

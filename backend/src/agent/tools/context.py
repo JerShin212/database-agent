@@ -14,6 +14,7 @@ class ToolContext:
     database_id: Optional[UUID] = None
     database_path: Optional[Path] = None  # Pre-fetched path to SQLite file
     database_name: Optional[str] = None
+    connector_id: Optional[UUID] = None  # For external database connectors
     collection_ids: Optional[list[UUID]] = None
 
 

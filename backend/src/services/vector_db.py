@@ -247,3 +247,183 @@ class VectorDBService:
         stmt = text("DELETE FROM document_chunks WHERE collection_id = :collection_id")
         await self.db.execute(stmt, {"collection_id": str(collection_id)})
         await self.db.commit()
+
+    # ===== Schema Catalog Search Methods =====
+
+    async def search_schema_keyword(
+        self,
+        query_text: str,
+        connector_id: UUID,
+        limit: int = 5,
+    ) -> list[dict]:
+        """Search schema definitions using BM25-like keyword search.
+
+        Args:
+            query_text: Natural language query for keyword matching
+            connector_id: Filter by connector ID
+            limit: Maximum results to return
+
+        Returns:
+            List of matching schema definitions with BM25 scores
+        """
+        # PostgreSQL FTS with BM25-like scoring
+        stmt = text("""
+            SELECT
+                sd.id,
+                sd.definition_type,
+                sd.table_name,
+                sd.column_name,
+                sd.data_type,
+                sd.semantic_definition,
+                sd.sample_values,
+                bm25_rank(
+                    sd.search_vector,
+                    websearch_to_tsquery('english', :query),
+                    sd.content_length,
+                    500.0,  -- avg_length parameter
+                    1.2,    -- k1 parameter
+                    0.75    -- b parameter
+                ) as score
+            FROM schema_definitions sd
+            WHERE sd.connector_id = :connector_id
+              AND sd.search_vector @@ websearch_to_tsquery('english', :query)
+            ORDER BY score DESC
+            LIMIT :limit
+        """)
+
+        params = {
+            "query": query_text,
+            "connector_id": str(connector_id),
+            "limit": limit,
+        }
+
+        result = await self.db.execute(stmt, params)
+        rows = result.fetchall()
+
+        return [
+            {
+                "definition_id": row[0],
+                "definition_type": row[1],
+                "table_name": row[2],
+                "column_name": row[3],
+                "data_type": row[4],
+                "semantic_definition": row[5],
+                "sample_values": row[6],
+                "score": float(row[7]),
+            }
+            for row in rows
+        ]
+
+    async def search_schema_semantic(
+        self,
+        query_embedding: list[float],
+        connector_id: UUID,
+        limit: int = 5,
+    ) -> list[dict]:
+        """Search schema definitions using cosine similarity.
+
+        Args:
+            query_embedding: Query vector embedding
+            connector_id: Filter by connector ID
+            limit: Maximum results to return
+
+        Returns:
+            List of similar schema definitions with cosine similarity scores
+        """
+        # Format embedding as PostgreSQL array literal
+        embedding_literal = "ARRAY[" + ",".join(str(x) for x in query_embedding) + "]::vector"
+
+        # Use <=> for cosine distance (matches vchordrq index)
+        stmt = text(f"""
+            SELECT
+                sd.id,
+                sd.definition_type,
+                sd.table_name,
+                sd.column_name,
+                sd.data_type,
+                sd.semantic_definition,
+                sd.sample_values,
+                sd.embedding <=> {embedding_literal} as distance,
+                1.0 - (sd.embedding <=> {embedding_literal}) as similarity
+            FROM schema_definitions sd
+            WHERE sd.connector_id = :connector_id
+              AND sd.embedding IS NOT NULL
+            ORDER BY sd.embedding <=> {embedding_literal}
+            LIMIT :limit
+        """)
+
+        params = {
+            "connector_id": str(connector_id),
+            "limit": limit,
+        }
+
+        result = await self.db.execute(stmt, params)
+        rows = result.fetchall()
+
+        return [
+            {
+                "definition_id": row[0],
+                "definition_type": row[1],
+                "table_name": row[2],
+                "column_name": row[3],
+                "data_type": row[4],
+                "semantic_definition": row[5],
+                "sample_values": row[6],
+                "distance": float(row[7]),
+                "score": float(row[8]),  # Use similarity as score
+            }
+            for row in rows
+        ]
+
+    async def search_schema_hybrid(
+        self,
+        query_text: str,
+        query_embedding: list[float],
+        connector_id: UUID,
+        limit: int = 5,
+        rrf_k: int = 60,
+    ) -> list[dict]:
+        """Search schema definitions using hybrid retrieval (keyword + semantic + RRF).
+
+        Combines BM25 keyword search and cosine similarity semantic search
+        using Reciprocal Rank Fusion.
+
+        Args:
+            query_text: Natural language query for keyword search
+            query_embedding: Query embedding vector for semantic search
+            connector_id: Filter by connector ID
+            limit: Maximum results to return after fusion
+            rrf_k: RRF constant parameter (default 60)
+
+        Returns:
+            Combined ranked results using Reciprocal Rank Fusion
+        """
+        from src.services.rrf import reciprocal_rank_fusion
+
+        # Fetch more results from each method for better fusion
+        fetch_limit = limit * 3
+
+        # Execute both searches in parallel
+        import asyncio
+        keyword_results, semantic_results = await asyncio.gather(
+            self.search_schema_keyword(
+                query_text=query_text,
+                connector_id=connector_id,
+                limit=fetch_limit,
+            ),
+            self.search_schema_semantic(
+                query_embedding=query_embedding,
+                connector_id=connector_id,
+                limit=fetch_limit,
+            ),
+        )
+
+        # Apply Reciprocal Rank Fusion
+        combined_results = reciprocal_rank_fusion(
+            result_lists=[keyword_results, semantic_results],
+            key_fn=lambda x: x["definition_id"],
+            k=rrf_k,
+        )
+
+        # Return top-k after fusion
+        return combined_results[:limit]

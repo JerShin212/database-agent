@@ -91,3 +91,32 @@ export interface ChatStreamChunk {
   result?: string
   error?: string
 }
+
+export interface Connector {
+  id: string
+  user_id: string
+  name: string
+  db_type: 'sqlite' | 'postgresql' | 'mysql'
+  status: 'pending' | 'indexing' | 'ready' | 'failed'
+  indexing_progress: {
+    stage: string
+    current: number
+    total: number
+    table?: string
+    column?: string
+  } | null
+  error_message: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface SchemaSearchResult {
+  id: string
+  definition_type: 'table' | 'column'
+  table_name: string
+  column_name: string | null
+  data_type: string | null
+  semantic_definition: string
+  sample_values: unknown[] | null
+  score: number | null
+}

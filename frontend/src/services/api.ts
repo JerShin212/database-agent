@@ -7,6 +7,8 @@ import type {
   DatabaseSchema,
   SearchResult,
   ChatStreamChunk,
+  Connector,
+  SchemaSearchResult,
 } from '../types'
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000'
@@ -198,5 +200,77 @@ export const databasesApi = {
 
   async delete(id: string): Promise<void> {
     await api.delete(`/api/databases/${id}`)
+  },
+}
+
+// Connectors API
+export const connectorsApi = {
+  async list(userId?: string, status?: string): Promise<Connector[]> {
+    const params = new URLSearchParams()
+    if (userId) params.append('user_id', userId)
+    if (status) params.append('status', status)
+
+    const response = await api.get(`/api/connectors?${params}`)
+    return response.data
+  },
+
+  async create(data: {
+    name: string
+    db_type: 'sqlite' | 'postgresql' | 'mysql'
+    connection_string: string
+    user_id: string
+  }): Promise<Connector> {
+    const response = await api.post('/api/connectors', data)
+    return response.data
+  },
+
+  async get(id: string): Promise<Connector> {
+    const response = await api.get(`/api/connectors/${id}`)
+    return response.data
+  },
+
+  async test(id: string): Promise<{ success: boolean; message: string }> {
+    const response = await api.post(`/api/connectors/${id}/test`)
+    return response.data
+  },
+
+  async index(id: string): Promise<{ message: string; connector_id: string }> {
+    const response = await api.post(`/api/connectors/${id}/index`)
+    return response.data
+  },
+
+  async delete(id: string): Promise<void> {
+    await api.delete(`/api/connectors/${id}`)
+  },
+
+  async searchSchema(data: {
+    query: string
+    connector_id: string
+    limit?: number
+  }): Promise<SchemaSearchResult[]> {
+    const response = await api.post('/api/schema/search', data)
+    return response.data
+  },
+
+  async listTables(connectorId: string): Promise<{ name: string; column_count: number }[]> {
+    const response = await api.get(`/api/schema/tables/${connectorId}`)
+    return response.data
+  },
+
+  async getTableSchema(
+    connectorId: string,
+    tableName: string
+  ): Promise<{
+    table_name: string
+    table_definition: string | null
+    columns: Array<{
+      name: string
+      data_type: string
+      semantic_definition: string
+      sample_values: unknown[] | null
+    }>
+  }> {
+    const response = await api.get(`/api/schema/tables/${connectorId}/${tableName}`)
+    return response.data
   },
 }

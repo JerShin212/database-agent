@@ -1,5 +1,6 @@
 import sqlite3
 import os
+import re
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -97,10 +98,10 @@ class SQLiteService:
                 error="Only SELECT queries are allowed",
             )
 
-        # Check for dangerous keywords
+        # Check for dangerous keywords using word boundaries
         dangerous_keywords = ["DROP", "DELETE", "INSERT", "UPDATE", "ALTER", "CREATE", "TRUNCATE"]
         for keyword in dangerous_keywords:
-            if keyword in sql_upper:
+            if re.search(rf"\b{keyword}\b", sql_upper):
                 return QueryResponse(
                     columns=[],
                     rows=[],

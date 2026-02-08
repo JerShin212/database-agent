@@ -20,6 +20,9 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     anthropic_api_key: str = ""
 
+    # Encryption
+    encryption_key: str = ""  # Fernet key for encrypting connection strings
+
     # Embedding model
     embedding_model: str = "text-embedding-3-small"
     embedding_dimensions: int = 1536
