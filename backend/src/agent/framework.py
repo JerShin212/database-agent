@@ -1,6 +1,21 @@
-import dspy
-from uuid import UUID
+"""
+OrchestratorAgent-based database agent framework.
+
+Replaces the DSPy ReAct implementation with a 3-worker multi-agent architecture:
+  - database_agent:      SQL queries and schema exploration
+  - text_search_agent:   Hybrid text RAG (BM25 + semantic)
+  - visual_search_agent: ColQwen2 visual page search
+
+The public interface (agent_framework.chat() async generator, chunk types) is
+unchanged so chat.py requires no modification.
+"""
+
+from __future__ import annotations
+
+import asyncio
 from typing import AsyncGenerator
+from uuid import UUID
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -9,7 +24,14 @@ from src.models.connector import Connector
 from src.models.conversation import Conversation, Message
 from src.models.database import SQLiteDatabase
 from src.services.sqlite_service import sqlite_service
-from src.agent.signatures import InitialQuerySignature, FollowUpQuerySignature
+from src.agent.agent_runtime import AgentRuntime
+from src.agent.orchestrator import OrchestratorAgent, AgentPool
+from src.agent.prompts import (
+    ORCHESTRATOR_SYSTEM_PROMPT,
+    DATABASE_AGENT_PROMPT,
+    TEXT_SEARCH_AGENT_PROMPT,
+    VISUAL_SEARCH_AGENT_PROMPT,
+)
 from src.agent.tools import (
     execute_sql_query,
     get_database_schema,
@@ -18,44 +40,166 @@ from src.agent.tools import (
     search_collections,
     list_collections,
     search_schema_catalog,
+    search_visual_documents,
     ToolContext,
     set_tool_context,
 )
 
+_WORKER_MODEL = "claude-haiku-4-5-20251001"
+_ORCHESTRATOR_MODEL = "claude-sonnet-4-6"
+_BUILTIN_TOOLS = ("read_file", "write_file", "bash", "list_directory")
+
 
 class DatabaseAgentFramework:
-    """DSPy-based database agent framework."""
+    """
+    OrchestratorAgent-based framework. A fresh orchestrator and worker pool is
+    created per chat() call to avoid session state leaking across requests.
+    """
 
-    def __init__(self):
-        self.tools = [
-            search_schema_catalog,
-            execute_sql_query,
-            get_database_schema,
-            list_tables,
-            get_table_info,
-            search_collections,
-            list_collections,
-        ]
+    # ------------------------------------------------------------------
+    # Worker builders
+    # ------------------------------------------------------------------
 
-        # Configure DSPy with Claude
-        self.lm = dspy.LM(
-            model="anthropic/claude-sonnet-4-20250514",
-            api_key=settings.anthropic_api_key,
+    def _build_database_worker(self, api_key: str) -> AgentRuntime:
+        worker = AgentRuntime(
+            api_key=api_key,
+            model=_WORKER_MODEL,
+            system=DATABASE_AGENT_PROMPT,
             max_tokens=4096,
+            max_iter=10,
+        )
+        worker.deny_tools(*_BUILTIN_TOOLS)
+        worker.add_tool(
+            "search_schema_catalog",
+            search_schema_catalog.__doc__ or "Search schema definitions semantically",
+            search_schema_catalog,
+            params={
+                "query": {"type": "string", "description": "Natural language query about the schema"},
+                "connector_id": {"type": "string", "description": "Optional connector UUID"},
+                "limit": {"type": "integer", "description": "Max results"},
+            },
+            required=["query"],
+        )
+        worker.add_tool(
+            "execute_sql_query",
+            execute_sql_query.__doc__ or "Execute a SQL SELECT query",
+            execute_sql_query,
+            params={
+                "sql": {"type": "string", "description": "SQL SELECT query to execute"},
+                "database_id": {"type": "string", "description": "Optional database UUID"},
+                "connector_id": {"type": "string", "description": "Optional connector UUID"},
+            },
+            required=["sql"],
+        )
+        worker.add_tool(
+            "get_database_schema",
+            get_database_schema.__doc__ or "Get full database schema",
+            get_database_schema,
+            params={
+                "database_id": {"type": "string", "description": "Optional database UUID"},
+                "connector_id": {"type": "string", "description": "Optional connector UUID"},
+            },
+            required=[],
+        )
+        worker.add_tool(
+            "list_tables",
+            list_tables.__doc__ or "List all tables in the database",
+            list_tables,
+            params={
+                "database_id": {"type": "string", "description": "Optional database UUID"},
+                "connector_id": {"type": "string", "description": "Optional connector UUID"},
+            },
+            required=[],
+        )
+        worker.add_tool(
+            "get_table_info",
+            get_table_info.__doc__ or "Get detailed info about a specific table",
+            get_table_info,
+            params={
+                "table_name": {"type": "string", "description": "Name of the table"},
+                "database_id": {"type": "string", "description": "Optional database UUID"},
+                "connector_id": {"type": "string", "description": "Optional connector UUID"},
+            },
+            required=["table_name"],
+        )
+        return worker
+
+    def _build_text_worker(self, api_key: str) -> AgentRuntime:
+        worker = AgentRuntime(
+            api_key=api_key,
+            model=_WORKER_MODEL,
+            system=TEXT_SEARCH_AGENT_PROMPT,
+            max_tokens=4096,
+            max_iter=6,
+        )
+        worker.deny_tools(*_BUILTIN_TOOLS)
+        worker.add_tool(
+            "search_collections",
+            search_collections.__doc__ or "Search document collections with hybrid search",
+            search_collections,
+            params={
+                "query": {"type": "string", "description": "Natural language search query"},
+                "collection_ids": {"type": "string", "description": "Optional comma-separated collection UUIDs"},
+                "limit": {"type": "integer", "description": "Max results"},
+            },
+            required=["query"],
+        )
+        worker.add_tool(
+            "list_collections",
+            list_collections.__doc__ or "List all document collections",
+            list_collections,
+            params={},
+            required=[],
+        )
+        return worker
+
+    def _build_visual_worker(self, api_key: str) -> AgentRuntime:
+        worker = AgentRuntime(
+            api_key=api_key,
+            model=_WORKER_MODEL,
+            system=VISUAL_SEARCH_AGENT_PROMPT,
+            max_tokens=4096,
+            max_iter=6,
+        )
+        worker.deny_tools(*_BUILTIN_TOOLS)
+        worker.add_tool(
+            "search_visual_documents",
+            search_visual_documents.__doc__ or "Search document pages visually using ColQwen2",
+            search_visual_documents,
+            params={
+                "query": {"type": "string", "description": "Description of the visual content to find"},
+                "collection_ids": {"type": "string", "description": "Optional comma-separated collection UUIDs"},
+                "limit": {"type": "integer", "description": "Max results"},
+            },
+            required=["query"],
+        )
+        worker.add_tool(
+            "list_collections",
+            list_collections.__doc__ or "List all document collections",
+            list_collections,
+            params={},
+            required=[],
+        )
+        return worker
+
+    def _build_orchestrator(self, api_key: str) -> OrchestratorAgent:
+        pool = AgentPool()
+        pool.register("database_agent", self._build_database_worker(api_key))
+        pool.register("text_search_agent", self._build_text_worker(api_key))
+        pool.register("visual_search_agent", self._build_visual_worker(api_key))
+
+        return OrchestratorAgent(
+            pool=pool,
+            system=ORCHESTRATOR_SYSTEM_PROMPT,
+            api_key=api_key,
+            model=_ORCHESTRATOR_MODEL,
+            max_tokens=8192,
+            max_iter=20,
         )
 
-        # Create agents
-        self.initial_agent = dspy.ReAct(
-            InitialQuerySignature,
-            tools=self.tools,
-            max_iters=10,
-        )
-
-        self.followup_agent = dspy.ReAct(
-            FollowUpQuerySignature,
-            tools=self.tools,
-            max_iters=10,
-        )
+    # ------------------------------------------------------------------
+    # Main chat interface
+    # ------------------------------------------------------------------
 
     async def chat(
         self,
@@ -68,17 +212,13 @@ class DatabaseAgentFramework:
         """
         Process a chat message and yield response components.
 
-        Args:
-            db: Database session
-            message: User message
-            conversation_id: Optional conversation ID for context
-            database_id: Optional database to query
-            collection_ids: Optional collections to search
-
-        Yields:
-            Response components (metadata, content, tool_calls, done)
+        Yields chunks:
+          {"type": "metadata", "conversation_id": str}
+          {"type": "content",  "content": str}
+          {"type": "error",    "error": str}
+          {"type": "done",     "conversation_id": str}
         """
-        # Pre-fetch database path for tools (avoids async issues in sync tools)
+        # --- 1. Pre-fetch database info (same as before) ---
         db_path = None
         db_name = None
         connector_id = None
@@ -92,19 +232,16 @@ class DatabaseAgentFramework:
                 db_path = sqlite_service.get_db_path(sqlite_db.id, sqlite_db.file_path)
                 db_name = sqlite_db.name
 
-                # Look up connector for this database (if it has one)
-                # Match by name pattern: "{db_name} (Semantic Catalog)"
                 result = await db.execute(
                     select(Connector).where(
                         Connector.name == f"{db_name} (Semantic Catalog)",
-                        Connector.status == "ready"
+                        Connector.status == "ready",
                     )
                 )
                 connector = result.scalar_one_or_none()
                 if connector:
                     connector_id = connector.id
         else:
-            # Get first active database
             result = await db.execute(
                 select(SQLiteDatabase).where(SQLiteDatabase.is_active == True).limit(1)
             )
@@ -114,19 +251,17 @@ class DatabaseAgentFramework:
                 db_path = sqlite_service.get_db_path(sqlite_db.id, sqlite_db.file_path)
                 db_name = sqlite_db.name
 
-                # Look up connector for this database
-                # Match by name pattern
                 result = await db.execute(
                     select(Connector).where(
                         Connector.name == f"{db_name} (Semantic Catalog)",
-                        Connector.status == "ready"
+                        Connector.status == "ready",
                     )
                 )
                 connector = result.scalar_one_or_none()
                 if connector:
                     connector_id = connector.id
 
-        # Set tool context for this request
+        # --- 2. Set ToolContext — propagates to worker tools via ContextVar ---
         context = ToolContext(
             db=db,
             database_id=database_id,
@@ -137,7 +272,7 @@ class DatabaseAgentFramework:
         )
         set_tool_context(context)
 
-        # Get or create conversation
+        # --- 3. Get or create conversation ---
         if conversation_id:
             result = await db.execute(
                 select(Conversation).where(Conversation.id == conversation_id)
@@ -154,21 +289,21 @@ class DatabaseAgentFramework:
             await db.refresh(conversation)
             conversation_id = conversation.id
 
-        # Yield metadata
         yield {
             "type": "metadata",
             "conversation_id": str(conversation_id),
         }
 
-        # Get conversation history
+        # --- 4. Load conversation history ---
         result = await db.execute(
             select(Message)
             .where(Message.conversation_id == conversation_id)
             .order_by(Message.created_at)
         )
         messages = result.scalars().all()
+        is_initial = len(messages) == 0
 
-        # Save user message
+        # Save user message to DB
         user_message = Message(
             conversation_id=conversation_id,
             role="user",
@@ -177,45 +312,26 @@ class DatabaseAgentFramework:
         db.add(user_message)
         await db.commit()
 
-        # Determine if initial or followup
-        is_initial = len(messages) == 0
-
-        # Build history for followup
-        history_text = ""
-        if not is_initial:
-            history_parts = []
-            for msg in messages:
-                history_parts.append(f"{msg.role.capitalize()}: {msg.content}")
+        # --- 5. Build full prompt with history injected ---
+        if is_initial:
+            full_prompt = message
+        else:
+            history_parts = [
+                f"{msg.role.capitalize()}: {msg.content}"
+                for msg in messages
+            ]
             history_text = "\n".join(history_parts)
+            full_prompt = (
+                f"[Previous conversation]\n{history_text}\n\n[User]: {message}"
+            )
 
-        # Execute agent
+        # --- 6. Run orchestrator in thread pool (sync → async, non-blocking) ---
         try:
-            with dspy.context(lm=self.lm):
-                if is_initial:
-                    result = self.initial_agent(question=message)
-                else:
-                    result = self.followup_agent(
-                        conversation_history=history_text,
-                        question=message,
-                    )
+            orchestrator = self._build_orchestrator(settings.anthropic_api_key)
 
-            answer = result.answer
+            loop = asyncio.get_event_loop()
+            answer = await loop.run_in_executor(None, orchestrator.run, full_prompt)
 
-            # Extract tool calls from trajectory if available
-            tool_calls = []
-            if hasattr(result, "trajectory"):
-                tool_calls = self._parse_trajectory(result.trajectory)
-
-            # Yield tool calls if any
-            for tool_call in tool_calls:
-                yield {
-                    "type": "tool_call",
-                    "tool": tool_call["tool"],
-                    "args": tool_call["args"],
-                    "result": tool_call["result"],
-                }
-
-            # Yield content
             yield {
                 "type": "content",
                 "content": answer,
@@ -226,14 +342,13 @@ class DatabaseAgentFramework:
                 conversation_id=conversation_id,
                 role="assistant",
                 content=answer,
-                tool_calls=tool_calls if tool_calls else None,
+                tool_calls=None,
             )
             db.add(assistant_message)
             await db.commit()
 
-            # Update conversation title if first message
+            # Set conversation title on first turn
             if is_initial:
-                # Use first 50 chars of message as title
                 title = message[:50] + "..." if len(message) > 50 else message
                 conversation.title = title
                 await db.commit()
@@ -244,38 +359,11 @@ class DatabaseAgentFramework:
                 "error": str(e),
             }
 
-        # Yield done
         yield {
             "type": "done",
             "conversation_id": str(conversation_id),
         }
 
-    def _parse_trajectory(self, trajectory: dict) -> list[dict]:
-        """Parse DSPy trajectory to extract tool calls."""
-        tool_calls = []
 
-        if not trajectory:
-            return tool_calls
-
-        i = 0
-        while True:
-            tool_name_key = f"tool_name_{i}"
-            tool_args_key = f"tool_args_{i}"
-            observation_key = f"observation_{i}"
-
-            if tool_name_key not in trajectory:
-                break
-
-            tool_calls.append({
-                "tool": trajectory.get(tool_name_key, ""),
-                "args": trajectory.get(tool_args_key, {}),
-                "result": trajectory.get(observation_key, ""),
-            })
-
-            i += 1
-
-        return tool_calls
-
-
-# Singleton instance
+# Singleton instance — matches existing import in chat.py
 agent_framework = DatabaseAgentFramework()

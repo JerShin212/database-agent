@@ -128,6 +128,88 @@ def search_collections(query: str, collection_ids: str = None, limit: int = 5) -
         return f"Error searching collections: {str(e)}"
 
 
+def search_visual_documents(query: str, collection_ids: str = None, limit: int = 5) -> str:
+    """
+    Search document pages visually using ColQwen2 embeddings.
+
+    Finds the most visually relevant PDF pages based on the query. Use this for
+    queries about diagrams, figures, charts, tables, schematics, or any content
+    where visual layout matters and plain text search may miss it.
+
+    Args:
+        query: Natural language description of the visual content to find
+        collection_ids: Optional comma-separated list of collection IDs to search
+        limit: Maximum number of page results (default 5)
+
+    Returns:
+        Relevant document pages with filename, page number, and similarity score
+    """
+    from sqlalchemy import text as sa_text
+    from src.services.colqwen2_client import colqwen2_client
+    from src.db.database import SyncSessionLocal
+
+    if not colqwen2_client.text_endpoint:
+        return (
+            "Visual document search is not configured. "
+            "Set COLQWEN2_TEXT_ENDPOINT in environment to enable this capability."
+        )
+
+    context = get_tool_context()
+
+    coll_ids = None
+    if collection_ids:
+        try:
+            coll_ids = [UUID(cid.strip()) for cid in collection_ids.split(",")]
+        except ValueError:
+            return "Error: Invalid collection ID format"
+    elif context and context.collection_ids:
+        coll_ids = context.collection_ids
+
+    try:
+        query_embedding = colqwen2_client.embed_text_sync(query)
+        if not query_embedding:
+            return "Visual search unavailable: failed to generate query embedding."
+
+        embedding_literal = "ARRAY[" + ",".join(str(x) for x in query_embedding) + "]::vector"
+
+        with SyncSessionLocal() as db:
+            if coll_ids:
+                coll_ids_str = ",".join(f"'{str(cid)}'" for cid in coll_ids)
+                coll_filter = f"AND dp.collection_id IN ({coll_ids_str})"
+            else:
+                coll_filter = ""
+
+            stmt = sa_text(f"""
+                SELECT
+                    dp.page_number,
+                    d.filename,
+                    1.0 - (dp.visual_embedding <=> {embedding_literal}) as similarity
+                FROM document_pages dp
+                JOIN documents d ON dp.document_id = d.id
+                WHERE dp.visual_embedding IS NOT NULL
+                {coll_filter}
+                ORDER BY dp.visual_embedding <=> {embedding_literal}
+                LIMIT :limit
+            """)
+            result = db.execute(stmt, {"limit": limit})
+            rows = result.fetchall()
+
+        if not rows:
+            return "No visually relevant document pages found for your query."
+
+        lines = [f"Found {len(rows)} visually relevant pages:", ""]
+        for i, row in enumerate(rows, 1):
+            page_number, filename, similarity = row
+            lines.append(f"### Result {i} (similarity: {float(similarity):.3f})")
+            lines.append(f"**Source:** {filename}, Page {page_number}")
+            lines.append("")
+
+        return "\n".join(lines)
+
+    except Exception as e:
+        return f"Error searching visual documents: {str(e)}"
+
+
 def list_collections() -> str:
     """
     List all available document collections.

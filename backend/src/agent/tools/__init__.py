@@ -7,6 +7,7 @@ from src.agent.tools.sql_tools import (
 from src.agent.tools.search_tools import (
     search_collections,
     list_collections,
+    search_visual_documents,
 )
 from src.agent.tools.schema_tools import (
     search_schema_catalog,
@@ -20,6 +21,7 @@ __all__ = [
     "get_table_info",
     "search_collections",
     "list_collections",
+    "search_visual_documents",
     "search_schema_catalog",
     "ToolContext",
     "set_tool_context",

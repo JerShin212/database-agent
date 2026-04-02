@@ -1,4 +1,4 @@
-from src.models.collection import Collection, Document, DocumentChunk
+from src.models.collection import Collection, Document, DocumentChunk, DocumentPage
 from src.models.connector import Connector, SchemaDefinition, SchemaRelationship
 from src.models.conversation import Conversation, Message
 from src.models.database import SQLiteDatabase
@@ -10,6 +10,7 @@ __all__ = [
     "Conversation",
     "Document",
     "DocumentChunk",
+    "DocumentPage",
     "Message",
     "SchemaDefinition",
     "SchemaRelationship",

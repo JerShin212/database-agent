@@ -54,3 +54,18 @@ class DocumentChunk(Base):
     end_char: Optional[int] = Column(Integer, nullable=True)
     embedding = Column(Vector(1536), nullable=True)
     created_at: datetime = Column(DateTime, default=datetime.utcnow)
+
+
+class DocumentPage(Base):
+    __tablename__ = "document_pages"
+
+    id: UUID = Column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
+    document_id: UUID = Column(
+        PGUUID(as_uuid=True), ForeignKey("documents.id", ondelete="CASCADE"), nullable=False
+    )
+    collection_id: UUID = Column(
+        PGUUID(as_uuid=True), ForeignKey("collections.id", ondelete="CASCADE"), nullable=False
+    )
+    page_number: int = Column(Integer, nullable=False)
+    visual_embedding = Column(Vector(128), nullable=True)
+    created_at: datetime = Column(DateTime, default=datetime.utcnow)

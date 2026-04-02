@@ -27,6 +27,11 @@ class Settings(BaseSettings):
     embedding_model: str = "text-embedding-3-small"
     embedding_dimensions: int = 1536
 
+    # ColQwen2 visual search (Modal endpoints)
+    colqwen2_pdf_endpoint: str = ""
+    colqwen2_text_endpoint: str = ""
+    visual_embedding_dimensions: int = 128
+
     # Chunking config
     chunk_size: int = 500
     chunk_overlap: int = 50

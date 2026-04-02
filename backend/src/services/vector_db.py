@@ -236,6 +236,83 @@ class VectorDBService:
         # Return top-k after fusion
         return combined_results[:limit]
 
+    async def insert_pages(self, pages: list[dict]) -> None:
+        """Insert document pages with ColQwen2 visual embeddings."""
+        if not pages:
+            return
+
+        for page in pages:
+            embedding = page["visual_embedding"]
+            embedding_literal = "ARRAY[" + ",".join(str(x) for x in embedding) + "]::vector"
+
+            stmt = text(f"""
+                INSERT INTO document_pages
+                (id, document_id, collection_id, page_number, visual_embedding)
+                VALUES (:id, :document_id, :collection_id, :page_number, {embedding_literal})
+            """)
+            await self.db.execute(
+                stmt,
+                {
+                    "id": str(page["id"]),
+                    "document_id": str(page["document_id"]),
+                    "collection_id": str(page["collection_id"]),
+                    "page_number": page["page_number"],
+                },
+            )
+        await self.db.commit()
+
+    async def search_visual_similar(
+        self,
+        query_embedding: list[float],
+        collection_ids: list[UUID] | None = None,
+        limit: int = 5,
+    ) -> list[dict]:
+        """Search document pages using ColQwen2 visual embeddings (cosine similarity)."""
+        embedding_literal = "ARRAY[" + ",".join(str(x) for x in query_embedding) + "]::vector"
+
+        if collection_ids:
+            collection_filter = "AND dp.collection_id = ANY(:collection_ids)"
+            params = {
+                "collection_ids": [str(cid) for cid in collection_ids],
+                "limit": limit,
+            }
+        else:
+            collection_filter = ""
+            params = {"limit": limit}
+
+        stmt = text(f"""
+            SELECT
+                dp.id,
+                dp.document_id,
+                dp.collection_id,
+                dp.page_number,
+                d.filename,
+                dp.visual_embedding <=> {embedding_literal} as distance,
+                1.0 - (dp.visual_embedding <=> {embedding_literal}) as similarity
+            FROM document_pages dp
+            JOIN documents d ON dp.document_id = d.id
+            WHERE dp.visual_embedding IS NOT NULL
+            {collection_filter}
+            ORDER BY dp.visual_embedding <=> {embedding_literal}
+            LIMIT :limit
+        """)
+
+        result = await self.db.execute(stmt, params)
+        rows = result.fetchall()
+
+        return [
+            {
+                "page_id": row[0],
+                "document_id": row[1],
+                "collection_id": row[2],
+                "page_number": row[3],
+                "filename": row[4],
+                "distance": float(row[5]),
+                "score": float(row[6]),
+            }
+            for row in rows
+        ]
+
     async def delete_by_document(self, document_id: UUID) -> None:
         """Delete all chunks for a document."""
         stmt = text("DELETE FROM document_chunks WHERE document_id = :document_id")

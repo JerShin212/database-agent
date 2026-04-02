@@ -73,6 +73,17 @@ class DocumentProcessor:
                 # Insert chunks with embeddings
                 await self.vector_db.insert_chunks(chunk_records)
 
+            # Visual processing: generate per-page ColQwen2 embeddings for PDFs
+            if document.mime_type == "application/pdf":
+                from src.processing.visual_processor import VisualDocumentProcessor
+                visual_proc = VisualDocumentProcessor(self.db)
+                await visual_proc.process_pdf(
+                    document_id=document_id,
+                    collection_id=document.collection_id,
+                    pdf_bytes=file_content,
+                    filename=document.filename,
+                )
+
             # Update status to completed
             await self._update_status(document_id, "completed")
 
