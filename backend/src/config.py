@@ -23,13 +23,12 @@ class Settings(BaseSettings):
     # Encryption
     encryption_key: str = ""  # Fernet key for encrypting connection strings
 
-    # Embedding model
-    embedding_model: str = "text-embedding-3-small"
-    embedding_dimensions: int = 1536
+    # Embedding dimensions (ColQwen2 text embeddings)
+    embedding_dimensions: int = 128
 
     # ColQwen2 visual search (Modal endpoints)
-    colqwen2_pdf_endpoint: str = ""
-    colqwen2_text_endpoint: str = ""
+    colqwen2_pdf_endpoint: str = "https://jershin212--daikin-test-colqwen2-embedder-model-embed-pdf.modal.run"
+    colqwen2_text_endpoint: str = "https://jershin212--daikin-test-colqwen2-embedder-model-embed-text.modal.run"
     visual_embedding_dimensions: int = 128
 
     # Chunking config

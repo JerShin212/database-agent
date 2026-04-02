@@ -8,9 +8,7 @@ to understand database structure and generate accurate SQL queries.
 from uuid import UUID
 
 from src.agent.tools.context import get_tool_context
-from src.config import settings
 from src.db.database import SyncSessionLocal
-import openai
 from sqlalchemy import text
 from src.services.rrf import reciprocal_rank_fusion
 
@@ -62,13 +60,11 @@ def search_schema_catalog(query: str, connector_id: str = None, limit: int = 5) 
         return f"Error: Invalid connector ID: {target_connector_id}"
 
     try:
-        # Generate embedding for semantic search using sync client
-        client = openai.OpenAI(api_key=settings.openai_api_key)
-        response = client.embeddings.create(
-            model=settings.embedding_model,
-            input=query,
-        )
-        query_embedding = response.data[0].embedding
+        # Generate embedding for semantic search via ColQwen2
+        from src.services.colqwen2_client import colqwen2_client
+        query_embedding = colqwen2_client.embed_text_sync(query)
+        if not query_embedding:
+            return "Error: Text embedding endpoint is not configured."
 
         # Use sync session for database access
         with SyncSessionLocal() as db:

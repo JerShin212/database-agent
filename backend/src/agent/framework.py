@@ -74,9 +74,8 @@ class DatabaseAgentFramework:
             search_schema_catalog.__doc__ or "Search schema definitions semantically",
             search_schema_catalog,
             params={
-                "query": {"type": "string", "description": "Natural language query about the schema"},
-                "connector_id": {"type": "string", "description": "Optional connector UUID"},
-                "limit": {"type": "integer", "description": "Max results"},
+                "query": {"type": "string", "description": "Natural language query about the schema (e.g. 'product stock quantity')"},
+                "limit": {"type": "integer", "description": "Max results (default 5)"},
             },
             required=["query"],
         )
@@ -86,8 +85,6 @@ class DatabaseAgentFramework:
             execute_sql_query,
             params={
                 "sql": {"type": "string", "description": "SQL SELECT query to execute"},
-                "database_id": {"type": "string", "description": "Optional database UUID"},
-                "connector_id": {"type": "string", "description": "Optional connector UUID"},
             },
             required=["sql"],
         )
@@ -95,20 +92,14 @@ class DatabaseAgentFramework:
             "get_database_schema",
             get_database_schema.__doc__ or "Get full database schema",
             get_database_schema,
-            params={
-                "database_id": {"type": "string", "description": "Optional database UUID"},
-                "connector_id": {"type": "string", "description": "Optional connector UUID"},
-            },
+            params={},
             required=[],
         )
         worker.add_tool(
             "list_tables",
             list_tables.__doc__ or "List all tables in the database",
             list_tables,
-            params={
-                "database_id": {"type": "string", "description": "Optional database UUID"},
-                "connector_id": {"type": "string", "description": "Optional connector UUID"},
-            },
+            params={},
             required=[],
         )
         worker.add_tool(
@@ -117,8 +108,6 @@ class DatabaseAgentFramework:
             get_table_info,
             params={
                 "table_name": {"type": "string", "description": "Name of the table"},
-                "database_id": {"type": "string", "description": "Optional database UUID"},
-                "connector_id": {"type": "string", "description": "Optional connector UUID"},
             },
             required=["table_name"],
         )
@@ -139,8 +128,7 @@ class DatabaseAgentFramework:
             search_collections,
             params={
                 "query": {"type": "string", "description": "Natural language search query"},
-                "collection_ids": {"type": "string", "description": "Optional comma-separated collection UUIDs"},
-                "limit": {"type": "integer", "description": "Max results"},
+                "limit": {"type": "integer", "description": "Max results (default 5)"},
             },
             required=["query"],
         )
@@ -168,8 +156,7 @@ class DatabaseAgentFramework:
             search_visual_documents,
             params={
                 "query": {"type": "string", "description": "Description of the visual content to find"},
-                "collection_ids": {"type": "string", "description": "Optional comma-separated collection UUIDs"},
-                "limit": {"type": "integer", "description": "Max results"},
+                "limit": {"type": "integer", "description": "Max results (default 5)"},
             },
             required=["query"],
         )
@@ -271,6 +258,11 @@ class DatabaseAgentFramework:
             collection_ids=collection_ids,
         )
         set_tool_context(context)
+        import logging as _logging
+        _logging.getLogger(__name__).info(
+            "[framework] ToolContext: database_id=%s db_path=%s connector_id=%s",
+            database_id, db_path, connector_id,
+        )
 
         # --- 3. Get or create conversation ---
         if conversation_id:
@@ -329,8 +321,17 @@ class DatabaseAgentFramework:
         try:
             orchestrator = self._build_orchestrator(settings.anthropic_api_key)
 
-            loop = asyncio.get_event_loop()
-            answer = await loop.run_in_executor(None, orchestrator.run, full_prompt)
+            # Capture context in closure so it's explicitly re-set inside the thread.
+            # This is more reliable than relying solely on ContextVar copy_context()
+            # propagation through run_in_executor inside an async generator.
+            _ctx = context
+
+            def _run_orchestrator() -> str:
+                set_tool_context(_ctx)
+                return orchestrator.run(full_prompt)
+
+            loop = asyncio.get_running_loop()
+            answer = await loop.run_in_executor(None, _run_orchestrator)
 
             yield {
                 "type": "content",

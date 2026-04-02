@@ -52,6 +52,27 @@ class ColQwen2Client:
             resp.raise_for_status()
             return self._mean_pool(resp.json()["embeddings"])
 
+    async def embed_batch(self, texts: list[str], concurrency: int = 10) -> list[list[float]]:
+        """
+        Embed multiple texts concurrently via the ColQwen2 text endpoint.
+        Returns a list of 128-dim mean-pooled vectors.
+        """
+        import asyncio
+
+        if not self.text_endpoint:
+            return [[] for _ in texts]
+
+        semaphore = asyncio.Semaphore(concurrency)
+
+        async def _embed_one(text: str) -> list[float]:
+            async with semaphore:
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    resp = await client.post(self.text_endpoint, json={"text": text})
+                    resp.raise_for_status()
+                    return self._mean_pool(resp.json()["embeddings"])
+
+        return await asyncio.gather(*[_embed_one(t) for t in texts])
+
     async def embed_pdf(self, pdf_bytes: bytes, filename: str) -> list[list[float]]:
         """
         Send a PDF to the Modal endpoint and return one 128-dim vector per page.

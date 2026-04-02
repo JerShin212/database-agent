@@ -52,7 +52,7 @@ class DocumentChunk(Base):
     content: str = Column(Text, nullable=False)
     start_char: Optional[int] = Column(Integer, nullable=True)
     end_char: Optional[int] = Column(Integer, nullable=True)
-    embedding = Column(Vector(1536), nullable=True)
+    embedding = Column(Vector(128), nullable=True)
     created_at: datetime = Column(DateTime, default=datetime.utcnow)
 
 

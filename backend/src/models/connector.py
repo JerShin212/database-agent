@@ -62,7 +62,7 @@ class SchemaDefinition(Base):
     data_type = Column(String(100))  # e.g., 'VARCHAR(255)', 'INTEGER', 'TIMESTAMP'
     semantic_definition = Column(Text, nullable=False)  # LLM-generated description
     sample_values = Column(JSONB)  # Sample data for context
-    embedding = Column(Vector(1536))  # OpenAI text-embedding-3-small
+    embedding = Column(Vector(128))  # ColQwen2 text embeddings
     search_vector = Column(TSVECTOR, Computed(
         "setweight(to_tsvector('english', COALESCE(table_name, '')), 'A') || "
         "setweight(to_tsvector('english', COALESCE(column_name, '')), 'A') || "

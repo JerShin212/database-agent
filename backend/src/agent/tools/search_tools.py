@@ -1,8 +1,11 @@
+import logging
 from uuid import UUID
 
 from src.agent.tools.context import get_tool_context
 from src.db.database import SyncSessionLocal
 from src.models.collection import Collection
+
+logger = logging.getLogger(__name__)
 
 
 def search_collections(query: str, collection_ids: str = None, limit: int = 5) -> str:
@@ -24,8 +27,7 @@ def search_collections(query: str, collection_ids: str = None, limit: int = 5) -
         Relevant document chunks with citations and relevance scores
     """
     from sqlalchemy import text
-    from src.config import settings
-    import openai
+    from src.services.colqwen2_client import colqwen2_client
     from src.services.rrf import reciprocal_rank_fusion
 
     context = get_tool_context()
@@ -41,13 +43,10 @@ def search_collections(query: str, collection_ids: str = None, limit: int = 5) -
         coll_ids = context.collection_ids
 
     try:
-        # Generate embedding for semantic search
-        client = openai.OpenAI(api_key=settings.openai_api_key)
-        response = client.embeddings.create(
-            model=settings.embedding_model,
-            input=query,
-        )
-        query_embedding = response.data[0].embedding
+        # Generate embedding for semantic search via ColQwen2
+        query_embedding = colqwen2_client.embed_text_sync(query)
+        if not query_embedding:
+            return "Error: Text embedding endpoint is not configured."
 
         with SyncSessionLocal() as db:
             fetch_limit = limit * 3
@@ -125,6 +124,7 @@ def search_collections(query: str, collection_ids: str = None, limit: int = 5) -
             return "\n".join(lines)
 
     except Exception as e:
+        logger.error("[search_collections] %s", e, exc_info=True)
         return f"Error searching collections: {str(e)}"
 
 
@@ -207,6 +207,7 @@ def search_visual_documents(query: str, collection_ids: str = None, limit: int =
         return "\n".join(lines)
 
     except Exception as e:
+        logger.error("[search_visual_documents] %s", e, exc_info=True)
         return f"Error searching visual documents: {str(e)}"
 
 
@@ -238,4 +239,5 @@ def list_collections() -> str:
             return "\n".join(lines)
 
     except Exception as e:
+        logger.error("[list_collections] %s", e, exc_info=True)
         return f"Error listing collections: {str(e)}"
