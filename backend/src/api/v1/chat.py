@@ -1,7 +1,5 @@
-import json
 from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import StreamingResponse
 from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -13,31 +11,44 @@ from src.agent.framework import agent_framework
 router = APIRouter()
 
 
-@router.post("/stream")
-async def chat_stream(
+@router.post("/")
+async def chat(
     request: ChatRequest,
     db: AsyncSession = Depends(get_db),
 ):
-    """Stream chat responses using SSE."""
+    """Process a chat message and return the full response."""
+    conversation_id = None
+    content = ""
+    tool_calls = []
+    error = None
 
-    async def generate():
-        async for component in agent_framework.chat(
-            db=db,
-            message=request.message,
-            conversation_id=request.conversation_id,
-            database_id=request.database_id,
-            collection_ids=request.collection_ids,
-        ):
-            yield f"data: {json.dumps(component)}\n\n"
+    async for chunk in agent_framework.chat(
+        db=db,
+        message=request.message,
+        conversation_id=request.conversation_id,
+        database_id=request.database_id,
+        collection_ids=request.collection_ids,
+    ):
+        chunk_type = chunk.get("type")
+        if chunk_type == "metadata":
+            conversation_id = chunk.get("conversation_id")
+        elif chunk_type == "content":
+            content += chunk.get("content", "")
+        elif chunk_type == "tool_call":
+            tool_calls.append({
+                "tool": chunk.get("tool", ""),
+                "args": chunk.get("args", {}),
+                "result": chunk.get("result", ""),
+            })
+        elif chunk_type == "error":
+            error = chunk.get("error")
 
-    return StreamingResponse(
-        generate(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-        },
-    )
+    return {
+        "conversation_id": conversation_id,
+        "content": content,
+        "tool_calls": tool_calls,
+        "error": error,
+    }
 
 
 @router.get("/conversations", response_model=list[ConversationResponse])

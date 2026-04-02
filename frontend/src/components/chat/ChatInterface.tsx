@@ -11,9 +11,7 @@ export default function ChatInterface() {
 
   const {
     messages,
-    isStreaming,
-    streamingContent,
-    streamingToolCalls,
+    isLoading,
     sendMessage,
   } = useChatStore()
 
@@ -21,7 +19,7 @@ export default function ChatInterface() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (!input.trim() || isStreaming) return
+    if (!input.trim() || isLoading) return
 
     const message = input.trim()
     setInput('')
@@ -54,9 +52,7 @@ export default function ChatInterface() {
       <div className="flex-1 overflow-y-auto">
         <MessageList
           messages={messages}
-          streamingContent={streamingContent}
-          streamingToolCalls={streamingToolCalls}
-          isStreaming={isStreaming}
+          isLoading={isLoading}
         />
       </div>
 
@@ -76,19 +72,19 @@ export default function ChatInterface() {
                 'focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent',
                 'max-h-40 overflow-y-auto'
               )}
-              disabled={isStreaming}
+              disabled={isLoading}
             />
             <button
               type="submit"
-              disabled={!input.trim() || isStreaming}
+              disabled={!input.trim() || isLoading}
               className={clsx(
                 'p-3 rounded-lg transition-colors',
-                input.trim() && !isStreaming
+                input.trim() && !isLoading
                   ? 'bg-blue-600 text-white hover:bg-blue-700'
                   : 'bg-gray-100 text-gray-400 cursor-not-allowed'
               )}
             >
-              {isStreaming ? (
+              {isLoading ? (
                 <Loader2 size={20} className="animate-spin" />
               ) : (
                 <Send size={20} />

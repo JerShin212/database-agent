@@ -82,14 +82,11 @@ export interface SearchResult {
   score: number
 }
 
-export interface ChatStreamChunk {
-  type: 'metadata' | 'content' | 'tool_call' | 'error' | 'done'
-  conversation_id?: string
-  content?: string
-  tool?: string
-  args?: Record<string, unknown>
-  result?: string
-  error?: string
+export interface ChatResponse {
+  conversation_id: string | null
+  content: string
+  tool_calls: ToolCall[]
+  error: string | null
 }
 
 export interface Connector {

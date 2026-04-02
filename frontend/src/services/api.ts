@@ -6,7 +6,7 @@ import type {
   Database,
   DatabaseSchema,
   SearchResult,
-  ChatStreamChunk,
+  ChatResponse,
   Connector,
   SchemaSearchResult,
 } from '../types'
@@ -22,55 +22,19 @@ const api = axios.create({
 
 // Chat API
 export const chatApi = {
-  async streamChat(
+  async sendMessage(
     message: string,
     conversationId: string | null,
     collectionIds: string[] | null,
     databaseId: string | null,
-    onChunk: (chunk: ChatStreamChunk) => void
-  ): Promise<void> {
-    const response = await fetch(`${API_URL}/api/chat/stream`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        message,
-        conversation_id: conversationId,
-        collection_ids: collectionIds,
-        database_id: databaseId,
-      }),
+  ): Promise<ChatResponse> {
+    const response = await api.post('/api/chat', {
+      message,
+      conversation_id: conversationId,
+      collection_ids: collectionIds,
+      database_id: databaseId,
     })
-
-    if (!response.ok) {
-      throw new Error('Failed to send message')
-    }
-
-    const reader = response.body?.getReader()
-    if (!reader) {
-      throw new Error('No response body')
-    }
-
-    const decoder = new TextDecoder()
-    let buffer = ''
-
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) break
-
-      buffer += decoder.decode(value, { stream: true })
-      const lines = buffer.split('\n')
-      buffer = lines.pop() || ''
-
-      for (const line of lines) {
-        if (line.startsWith('data: ')) {
-          try {
-            const chunk = JSON.parse(line.slice(6))
-            onChunk(chunk)
-          } catch {
-            // Ignore parse errors
-          }
-        }
-      }
-    }
+    return response.data
   },
 
   async getConversations(): Promise<Conversation[]> {

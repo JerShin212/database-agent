@@ -1,14 +1,12 @@
 import { create } from 'zustand'
-import type { Conversation, Message, ToolCall, ChatStreamChunk } from '../types'
+import type { Conversation, Message } from '../types'
 import { chatApi } from '../services/api'
 
 interface ChatState {
   conversations: Conversation[]
   currentConversation: Conversation | null
   messages: Message[]
-  isStreaming: boolean
-  streamingContent: string
-  streamingToolCalls: ToolCall[]
+  isLoading: boolean
   error: string | null
 
   // Actions
@@ -28,9 +26,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   conversations: [],
   currentConversation: null,
   messages: [],
-  isStreaming: false,
-  streamingContent: '',
-  streamingToolCalls: [],
+  isLoading: false,
   error: null,
 
   loadConversations: async () => {
@@ -58,8 +54,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set({
       currentConversation: null,
       messages: [],
-      streamingContent: '',
-      streamingToolCalls: [],
     })
   },
 
@@ -91,85 +85,53 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
     set({
       messages: [...messages, userMessage],
-      isStreaming: true,
-      streamingContent: '',
-      streamingToolCalls: [],
+      isLoading: true,
       error: null,
     })
 
-    let conversationId = currentConversation?.id || null
-    let assistantContent = ''
-    const toolCalls: ToolCall[] = []
-
     try {
-      await chatApi.streamChat(
+      const response = await chatApi.sendMessage(
         message,
-        conversationId,
+        currentConversation?.id || null,
         collectionIds || null,
         databaseId || null,
-        (chunk: ChatStreamChunk) => {
-          switch (chunk.type) {
-            case 'metadata':
-              conversationId = chunk.conversation_id || conversationId
-              break
-
-            case 'content':
-              assistantContent += chunk.content || ''
-              set({ streamingContent: assistantContent })
-              break
-
-            case 'tool_call':
-              toolCalls.push({
-                tool: chunk.tool || '',
-                args: chunk.args || {},
-                result: chunk.result || '',
-              })
-              set({ streamingToolCalls: [...toolCalls] })
-              break
-
-            case 'error':
-              set({ error: chunk.error || 'An error occurred' })
-              break
-
-            case 'done':
-              // Finalize the assistant message
-              const assistantMessage: Message = {
-                id: `msg-${Date.now()}`,
-                role: 'assistant',
-                content: assistantContent,
-                tool_calls: toolCalls.length > 0 ? toolCalls : undefined,
-                created_at: new Date().toISOString(),
-              }
-
-              const updatedMessages = [...get().messages, assistantMessage]
-              set({
-                messages: updatedMessages,
-                isStreaming: false,
-                streamingContent: '',
-                streamingToolCalls: [],
-              })
-
-              // Reload conversations to get updated list
-              get().loadConversations()
-
-              // Update current conversation
-              if (conversationId) {
-                set({
-                  currentConversation: {
-                    id: conversationId,
-                    title: message.slice(0, 50),
-                    created_at: new Date().toISOString(),
-                    updated_at: new Date().toISOString(),
-                  },
-                })
-              }
-              break
-          }
-        }
       )
+
+      if (response.error) {
+        set({ error: response.error, isLoading: false })
+        return
+      }
+
+      const assistantMessage: Message = {
+        id: `msg-${Date.now()}`,
+        role: 'assistant',
+        content: response.content,
+        tool_calls: response.tool_calls.length > 0 ? response.tool_calls : undefined,
+        created_at: new Date().toISOString(),
+      }
+
+      set({
+        messages: [...get().messages, assistantMessage],
+        isLoading: false,
+      })
+
+      // Reload conversations to get updated list
+      get().loadConversations()
+
+      // Update current conversation
+      if (response.conversation_id) {
+        set({
+          currentConversation: {
+            id: response.conversation_id,
+            title: message.slice(0, 50),
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          },
+        })
+      }
     } catch (error) {
       set({
-        isStreaming: false,
+        isLoading: false,
         error: 'Failed to send message',
       })
     }
