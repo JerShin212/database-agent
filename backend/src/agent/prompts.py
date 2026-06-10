@@ -65,12 +65,21 @@ connector ID, or any connection details. Just call the tools directly.
 
 ## Workflow
 
-1. **Discover schema first**: Call `search_schema_catalog` with a natural language phrase
+1. **Discover schema**: Start with `search_schema_catalog` — a natural language phrase
    describing what you're looking for (e.g., "customer email address", "product stock quantity").
-   If it returns nothing useful, fall back to `get_database_schema`.
+   Include literal values from the user's question — names, emails, cities, statuses
+   (e.g., for "orders by Janet" search "customer name Janet"). The catalog matches
+   query words against actual column data, so literals find the column containing them.
 
-2. **Write SQL**: Use exact table/column names from the schema. Only SELECT is allowed.
-   Include appropriate WHERE, GROUP BY, ORDER BY, and LIMIT clauses.
+   The catalog is a search aid, not the source of truth. If its results look irrelevant,
+   incomplete, or you're unsure a table/column actually exists, verify with the raw schema
+   tools: `get_database_schema` (full schema), `list_tables`, or `get_table_info` for a
+   specific table. Trust the raw schema over the catalog when they disagree.
+
+2. **Write SQL**: Use exact table/column names confirmed from the schema. Only SELECT is
+   allowed. Catalog results include `JOIN hint:` lines listing foreign keys — use those
+   exact equalities in your JOINs instead of guessing. Include appropriate WHERE,
+   GROUP BY, ORDER BY, and LIMIT clauses.
 
 3. **Execute**: Call `execute_sql_query` with your SQL.
 
@@ -79,9 +88,11 @@ connector ID, or any connection details. Just call the tools directly.
 ## Rules
 
 - NEVER ask the user for database IDs or connection details — the connection is automatic.
-- Never call `list_tables` then loop `get_table_info` for each table — that wastes iterations.
-  Use `search_schema_catalog` for targeted lookup.
-- Always verify column names before writing SQL to avoid errors.
+- Don't loop `get_table_info` over every table in the database — that wastes iterations.
+  Use `search_schema_catalog` for targeted lookup, and the raw schema tools to verify
+  specific tables or when catalog results are weak.
+- Always verify column names before writing SQL to avoid errors. If a query fails because
+  a table or column doesn't exist, check the raw schema and correct it — don't give up.
 - If your tools found nothing relevant after a reasonable attempt, your FINAL response
   MUST begin with the exact token `NO_RESULTS`, followed by one line summarizing what you tried."""
 

@@ -81,10 +81,22 @@ class ColQwen2Client:
             resp.raise_for_status()
             return self._mean_pool(resp.json()["embeddings"])
 
-    async def embed_batch(self, texts: list[str], concurrency: int = 10) -> list[list[float]]:
+    async def embed_text_multivector(self, text: str) -> list[list[float]]:
+        """Async full multi-vector (n_tokens, 128) for a text, [] if unconfigured."""
+        if not self.text_endpoint:
+            return []
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            resp = await client.post(self.text_endpoint, json={"text": text})
+            resp.raise_for_status()
+            return resp.json()["embeddings"]
+
+    async def embed_batch_multivector(
+        self, texts: list[str], concurrency: int = 10
+    ) -> list[list[list[float]]]:
         """
-        Embed multiple texts concurrently via the ColQwen2 text endpoint.
-        Returns a list of 128-dim mean-pooled vectors.
+        Embed multiple texts concurrently, returning full multi-vectors.
+        Failed/unconfigured entries come back as []. Callers can derive the
+        mean-pooled vector locally — one Modal round-trip per text total.
         """
         import asyncio
 
@@ -93,14 +105,22 @@ class ColQwen2Client:
 
         semaphore = asyncio.Semaphore(concurrency)
 
-        async def _embed_one(text: str) -> list[float]:
+        async def _embed_one(text: str) -> list[list[float]]:
             async with semaphore:
-                async with httpx.AsyncClient(timeout=120.0) as client:
-                    resp = await client.post(self.text_endpoint, json={"text": text})
-                    resp.raise_for_status()
-                    return self._mean_pool(resp.json()["embeddings"])
+                try:
+                    return await self.embed_text_multivector(text)
+                except Exception:
+                    return []
 
         return await asyncio.gather(*[_embed_one(t) for t in texts])
+
+    async def embed_batch(self, texts: list[str], concurrency: int = 10) -> list[list[float]]:
+        """
+        Embed multiple texts concurrently via the ColQwen2 text endpoint.
+        Returns a list of 128-dim mean-pooled vectors.
+        """
+        multivectors = await self.embed_batch_multivector(texts, concurrency)
+        return [self._mean_pool(mv) if mv else [] for mv in multivectors]
 
     @_retry_on_http_error
     def embed_image_multivector_sync(

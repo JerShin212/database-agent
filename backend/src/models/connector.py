@@ -12,7 +12,7 @@ from typing import Optional
 from uuid import UUID
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import Column, Computed, ForeignKey, String, Text, Integer, TIMESTAMP, Index
+from sqlalchemy import Column, Computed, ForeignKey, LargeBinary, String, Text, Integer, TIMESTAMP, Index
 from sqlalchemy.dialects.postgresql import UUID as PGUUID, JSONB, TSVECTOR
 from sqlalchemy.orm import relationship
 
@@ -61,18 +61,23 @@ class SchemaDefinition(Base):
     column_name = Column(String(255))  # NULL for table-level definitions
     data_type = Column(String(100))  # e.g., 'VARCHAR(255)', 'INTEGER', 'TIMESTAMP'
     semantic_definition = Column(Text, nullable=False)  # LLM-generated description
-    sample_values = Column(JSONB)  # Sample data for context
-    embedding = Column(Vector(128))  # ColQwen2 text embeddings
+    sample_values = Column(JSONB)  # Sample data for context (and value-aware search)
+    embedding = Column(Vector(128))  # ColQwen2 text embedding (mean-pooled)
+    embedding_text = Column(Text)  # Enriched serialization that was embedded
+    multi_embedding = Column(LargeBinary)  # Full multi-vector, float16 (n_vectors, 128), for MaxSim
+    n_vectors = Column(Integer)
     search_vector = Column(TSVECTOR, Computed(
         "setweight(to_tsvector('english', COALESCE(table_name, '')), 'A') || "
         "setweight(to_tsvector('english', COALESCE(column_name, '')), 'A') || "
-        "setweight(to_tsvector('english', COALESCE(semantic_definition, '')), 'B')",
+        "setweight(to_tsvector('english', COALESCE(semantic_definition, '')), 'B') || "
+        "setweight(to_tsvector('english', COALESCE(embedding_text, '')), 'C')",
         persisted=True
     ))  # Generated column for FTS
     content_length = Column(Integer, Computed(
         "length(COALESCE(table_name, '')) + "
         "length(COALESCE(column_name, '')) + "
-        "length(COALESCE(semantic_definition, ''))",
+        "length(COALESCE(semantic_definition, '')) + "
+        "length(COALESCE(embedding_text, ''))",
         persisted=True
     ))  # Generated column for BM25
     created_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default="CURRENT_TIMESTAMP")

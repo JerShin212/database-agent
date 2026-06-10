@@ -7,13 +7,26 @@ Introspects database schemas and generates semantic definitions with embeddings.
 import asyncio
 from uuid import UUID
 
+import numpy as np
+from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.models.connector import Connector, SchemaDefinition, SchemaRelationship
+from src.services.colqwen2_client import colqwen2_client
 from src.services.connector_service import ConnectorService
 from src.services.definition_generator import definition_generator
-from src.services.embedding_service import embedding_service
 from src.services.schema_inspector import SchemaInspector
+from src.services.schema_serializer import build_column_text, build_table_text
+
+
+def _pack_multivector(multivector: list[list[float]]) -> tuple[list[float] | None, bytes | None, int | None]:
+    """(pooled 128-dim, float16 bytes, n_vectors) from a multi-vector; Nones if empty."""
+    if not multivector:
+        return None, None, None
+    arr = np.array(multivector, dtype=np.float32)
+    pooled = arr.mean(axis=0).tolist()
+    packed = arr.astype(np.float16).tobytes()
+    return pooled, packed, arr.shape[0]
 
 
 class SchemaIndexer:
@@ -64,6 +77,16 @@ class SchemaIndexer:
                 progress={"stage": "starting", "current": 0, "total": 0}
             )
 
+            # Re-indexing replaces the catalog — remove any previous entries
+            # (without this, every re-index duplicated all definitions)
+            await db.execute(
+                delete(SchemaDefinition).where(SchemaDefinition.connector_id == connector_id)
+            )
+            await db.execute(
+                delete(SchemaRelationship).where(SchemaRelationship.connector_id == connector_id)
+            )
+            await db.commit()
+
             # Get database connector
             db_connector = connector_service.get_database_connector(connector)
 
@@ -113,22 +136,19 @@ class SchemaIndexer:
                     foreign_keys=table["foreign_keys"],
                 )
 
-                # Embed table definition
-                table_embedding_text = f"{table_name}: {table_definition}"
-                table_embedding = await embedding_service.embed_text(table_embedding_text)
-
-                # Store table definition
-                table_def = SchemaDefinition(
-                    connector_id=connector_id,
-                    definition_type="table",
+                # Enriched serialization — this is what gets embedded AND
+                # matched by FTS (weight C), so it includes humanized name
+                # tokens, types, patterns, FK targets, and sample values.
+                table_text = build_table_text(
                     table_name=table_name,
-                    semantic_definition=table_definition,
-                    embedding=table_embedding,
+                    definition=table_definition,
+                    column_names=[c["name"] for c in table["columns"]],
+                    row_count=table.get("row_count"),
                 )
-                db.add(table_def)
                 current_item += 1
 
-                # Generate column definitions
+                # Generate column definitions (LLM, serial) and enriched texts
+                column_entries = []
                 for column in table["columns"]:
                     column_name = column["name"]
 
@@ -155,7 +175,6 @@ class SchemaIndexer:
                             }
                             break
 
-                    # Generate column definition
                     column_definition = await definition_generator.generate_column_definition(
                         table_name=table_name,
                         column_name=column_name,
@@ -166,29 +185,66 @@ class SchemaIndexer:
                         foreign_key_info=fk_info,
                     )
 
-                    # Embed column definition
-                    column_embedding_text = f"{table_name}.{column_name}: {column_definition}"
-                    column_embedding = await embedding_service.embed_text(column_embedding_text)
-
-                    # Convert sample values to JSON-serializable format
                     sample_values_json = [
                         str(v) if v is not None else None
                         for v in column.get("sample_values", [])
                     ]
 
-                    # Store column definition
-                    column_def = SchemaDefinition(
-                        connector_id=connector_id,
-                        definition_type="column",
+                    fk_target = None
+                    if fk_info and fk_info.get("to_column"):
+                        fk_target = f"{fk_info['to_table']}.{fk_info['to_column']}"
+
+                    column_text = build_column_text(
                         table_name=table_name,
                         column_name=column_name,
                         data_type=column["type"],
-                        semantic_definition=column_definition,
+                        patterns=column.get("patterns", []),
+                        definition=column_definition,
                         sample_values=sample_values_json,
-                        embedding=column_embedding,
+                        fk_target=fk_target,
                     )
-                    db.add(column_def)
+
+                    column_entries.append({
+                        "column": column,
+                        "definition": column_definition,
+                        "embedding_text": column_text,
+                        "sample_values": sample_values_json,
+                    })
                     current_item += 1
+
+                # One batched Modal call per table: table text + all column texts.
+                # Multi-vectors give us both the pooled ANN vector and the
+                # MaxSim rerank representation from a single round-trip each.
+                texts = [table_text] + [e["embedding_text"] for e in column_entries]
+                multivectors = await colqwen2_client.embed_batch_multivector(texts)
+
+                pooled, packed, n_vec = _pack_multivector(multivectors[0])
+                db.add(SchemaDefinition(
+                    connector_id=connector_id,
+                    definition_type="table",
+                    table_name=table_name,
+                    semantic_definition=table_definition,
+                    embedding=pooled,
+                    embedding_text=table_text,
+                    multi_embedding=packed,
+                    n_vectors=n_vec,
+                ))
+
+                for entry, multivector in zip(column_entries, multivectors[1:]):
+                    pooled, packed, n_vec = _pack_multivector(multivector)
+                    db.add(SchemaDefinition(
+                        connector_id=connector_id,
+                        definition_type="column",
+                        table_name=table_name,
+                        column_name=entry["column"]["name"],
+                        data_type=entry["column"]["type"],
+                        semantic_definition=entry["definition"],
+                        sample_values=entry["sample_values"],
+                        embedding=pooled,
+                        embedding_text=entry["embedding_text"],
+                        multi_embedding=packed,
+                        n_vectors=n_vec,
+                    ))
 
                 # Commit after each table
                 await db.commit()

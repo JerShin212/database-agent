@@ -79,6 +79,13 @@ class SchemaInspector:
                 # Detect patterns
                 patterns = self._detect_value_patterns(col_name, col["type"], sample_values)
 
+                # Text-like columns get a wider distinct sample so value-aware
+                # catalog search can match literals from user queries
+                if self._is_text_like(col["type"], patterns):
+                    distinct = self._sample_distinct_values(table_name, col_name)
+                    if distinct:
+                        sample_values = distinct
+
                 enriched_columns.append({
                     **col,
                     "sample_values": sample_values,
@@ -102,6 +109,43 @@ class SchemaInspector:
             })
 
         return {"tables": enriched_tables}
+
+    @staticmethod
+    def _is_text_like(data_type: str, patterns: list[str]) -> bool:
+        """Columns worth sampling broadly for value-aware search."""
+        type_upper = (data_type or "").upper()
+        if any(t in type_upper for t in ["CHAR", "TEXT", "STRING", "VARCHAR"]):
+            return True
+        return any(p in patterns for p in ["name", "email", "status", "description", "url"])
+
+    def _sample_distinct_values(
+        self, table_name: str, column_name: str, limit: int = 20
+    ) -> list:
+        """
+        Sample up to `limit` distinct non-null values from a column for the
+        value-aware catalog search. Values longer than 200 chars are skipped,
+        the rest truncated to 100. Returns [] on any failure (caller falls
+        back to the row-sample values).
+        """
+        try:
+            result = self.db_connector.execute_query(
+                f"SELECT DISTINCT {column_name} FROM {table_name} "
+                f"WHERE {column_name} IS NOT NULL LIMIT {limit}",
+                limit=limit,
+            )
+            values = []
+            for row in result.get("rows", []):
+                value = row[0]
+                if value is None:
+                    continue
+                text = str(value)
+                if len(text) > 200:
+                    continue
+                values.append(text[:100])
+            return values
+        except Exception as e:
+            print(f"Warning: distinct sampling failed for {table_name}.{column_name}: {e}")
+            return []
 
     def _detect_value_patterns(
         self,

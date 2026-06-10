@@ -91,25 +91,32 @@ class DefinitionGenerator:
         context = "\n".join(context_parts)
 
         # Generate definition
-        prompt = f"""You are a database documentation expert. Generate a concise, human-readable definition for this database column.
+        prompt = f"""You are a database documentation expert. Generate a definition for this database column that will be used by a search engine to match users' natural language questions to the right column.
 
 {context}
 
-Write a 1-2 sentence definition that explains:
-1. What this column represents in business terms (not just technical description)
-2. What kind of data it stores and how it's used
+Write a 2-3 sentence definition that explains:
+1. What this column represents in business terms (not just a technical restatement of its name)
+2. What kind of data it stores — infer the format, units, or meaning from the sample values
+3. If it references another table, what that relationship means
 
-Be specific and practical. Focus on business meaning, not just repeating the technical details.
+CRITICAL for searchability: naturally weave in 2-4 alternative words or phrases a person
+might use when asking about this data. For example, a stock_quantity column should mention
+"inventory", "units available", "how much is left in stock"; a total_amount column should
+mention "price", "cost", "money spent", "order value". Think: what would a non-technical
+user type when they need this column?
+
+Be specific and practical. Do not invent facts the context doesn't support.
+Respond with plain prose only — no markdown headers, bullets, or bold text.
 
 Example good definitions:
-- "User's primary email address for login and notifications"
-- "Unique identifier for the order, used to track purchases across the system"
-- "Timestamp when the user account was created, used for analytics and user tenure calculations"
+- "The customer's primary email address, used for login, contact, and notifications. Search terms like contact details, e-mail, or reaching the customer all refer to this field."
+- "Number of units of the product currently available in inventory. Answers questions about stock levels, availability, how much is left, or whether an item is out of stock."
 
 Definition:"""
 
         try:
-            return await self._complete(prompt, max_tokens=150)
+            return await self._complete(prompt, max_tokens=200)
 
         except Exception as e:
             # Fallback to basic definition
@@ -143,9 +150,9 @@ Definition:"""
         if row_count is not None:
             context_parts.append(f"Approximate Row Count: {row_count:,}")
 
-        # Key columns
-        key_columns = [col["name"] for col in columns[:5]]  # First 5 columns
-        context_parts.append(f"Key Columns: {', '.join(key_columns)}")
+        # All column names give the model the full picture of what the table holds
+        column_names = [col["name"] for col in columns[:30]]
+        context_parts.append(f"Columns: {', '.join(column_names)}")
 
         # Primary key
         pk_cols = [col["name"] for col in columns if col.get("primary_key")]
@@ -164,25 +171,31 @@ Definition:"""
         context = "\n".join(context_parts)
 
         # Generate definition
-        prompt = f"""You are a database documentation expert. Generate a concise, human-readable definition for this database table.
+        prompt = f"""You are a database documentation expert. Generate a definition for this database table that will be used by a search engine to match users' natural language questions to the right table.
 
 {context}
 
-Write 2-3 sentences that explain:
+Write 2-4 sentences that explain:
 1. What business entity or concept this table represents
-2. What is its primary purpose in the system
-3. How it relates to other parts of the database (if foreign keys are present)
+2. What typical questions this table answers (e.g., "who bought what", "how much revenue", "which rep covers which region")
+3. How it relates to other tables via its foreign keys — name the related tables and what the link means
 
-Focus on business meaning and practical usage.
+CRITICAL for searchability: naturally include alternative words a person might use for this
+entity (e.g., an orders table should mention purchases, transactions, sales; a sales_reps
+table should mention salesperson, account manager, representative). Think: what would a
+non-technical user say when they need data from this table?
+
+Do not invent facts the context doesn't support.
+Respond with plain prose only — no markdown headers, bullets, or bold text.
 
 Example good definitions:
-- "Stores user account information including login credentials and profile data. Central table for user identity across the application. Links to orders, sessions, and preferences."
-- "Records individual product orders with pricing and quantities. Each order belongs to a user and contains multiple order items. Used for transaction history and reporting."
+- "Records individual customer purchases (orders, transactions, sales) with date, status, and total amount. Answers questions like who bought what, how much was spent, and whether an order has shipped. Each order belongs to a customer and a sales rep, and its line items live in order_items."
+- "Junction table assigning customers to their sales representatives (account managers). Answers which salesperson handles which customer and since when. Links customers to sales_reps."
 
 Definition:"""
 
         try:
-            return await self._complete(prompt, max_tokens=200)
+            return await self._complete(prompt, max_tokens=250)
 
         except Exception as e:
             # Fallback to basic definition
