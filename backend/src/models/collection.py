@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Optional
 from uuid import UUID, uuid4
-from sqlalchemy import Column, String, Integer, Text, DateTime, ForeignKey
+from sqlalchemy import Column, String, Integer, LargeBinary, Text, DateTime, ForeignKey
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from pgvector.sqlalchemy import Vector
 from src.db.database import Base
@@ -68,4 +68,7 @@ class DocumentPage(Base):
     )
     page_number: int = Column(Integer, nullable=False)
     visual_embedding = Column(Vector(128), nullable=True)
+    # Full ColQwen2 multi-vector (n_vectors x 128, float16, row-major) for MaxSim rerank
+    multi_embedding = Column(LargeBinary, nullable=True)
+    n_vectors: Optional[int] = Column(Integer, nullable=True)
     created_at: datetime = Column(DateTime, default=datetime.utcnow)

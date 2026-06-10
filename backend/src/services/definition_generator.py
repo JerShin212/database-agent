@@ -4,12 +4,14 @@ Definition generator using LLM.
 Generates human-readable semantic definitions for tables and columns.
 """
 
-import json
 from typing import Any
 
-from openai import AsyncOpenAI
+from anthropic import AsyncAnthropic
 
 from src.config import settings
+
+_MODEL = "claude-haiku-4-5"
+_SYSTEM = "You are a database documentation expert."
 
 
 class DefinitionGenerator:
@@ -25,8 +27,20 @@ class DefinitionGenerator:
         return cls._instance
 
     def _initialize(self):
-        """Initialize OpenAI client."""
-        self._client = AsyncOpenAI(api_key=settings.openai_api_key)
+        """Initialize Anthropic client."""
+        self._client = AsyncAnthropic(api_key=settings.anthropic_api_key)
+
+    async def _complete(self, prompt: str, max_tokens: int) -> str:
+        """Run a single prompt through Haiku and return the text response."""
+        response = await self._client.messages.create(
+            model=_MODEL,
+            max_tokens=max_tokens,
+            system=_SYSTEM,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return next(
+            (block.text for block in response.content if block.type == "text"), ""
+        ).strip()
 
     async def generate_column_definition(
         self,
@@ -95,18 +109,7 @@ Example good definitions:
 Definition:"""
 
         try:
-            response = await self._client.chat.completions.create(
-                model=settings.openai_api_key and "gpt-4o-mini" or "gpt-3.5-turbo",
-                messages=[
-                    {"role": "system", "content": "You are a database documentation expert."},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.3,  # Lower temperature for more consistent output
-                max_tokens=150,
-            )
-
-            definition = response.choices[0].message.content.strip()
-            return definition
+            return await self._complete(prompt, max_tokens=150)
 
         except Exception as e:
             # Fallback to basic definition
@@ -179,18 +182,7 @@ Example good definitions:
 Definition:"""
 
         try:
-            response = await self._client.chat.completions.create(
-                model=settings.openai_api_key and "gpt-4o-mini" or "gpt-3.5-turbo",
-                messages=[
-                    {"role": "system", "content": "You are a database documentation expert."},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.3,
-                max_tokens=200,
-            )
-
-            definition = response.choices[0].message.content.strip()
-            return definition
+            return await self._complete(prompt, max_tokens=200)
 
         except Exception as e:
             # Fallback to basic definition
@@ -224,18 +216,7 @@ Focus on the business meaning (e.g., "Each order belongs to a user" or "Products
 Description:"""
 
         try:
-            response = await self._client.chat.completions.create(
-                model=settings.openai_api_key and "gpt-4o-mini" or "gpt-3.5-turbo",
-                messages=[
-                    {"role": "system", "content": "You are a database documentation expert."},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.3,
-                max_tokens=50,
-            )
-
-            description = response.choices[0].message.content.strip()
-            return description
+            return await self._complete(prompt, max_tokens=50)
 
         except Exception as e:
             return f"{from_table} references {to_table}"

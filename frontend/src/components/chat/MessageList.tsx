@@ -67,6 +67,11 @@ export default function MessageList({
 function MessageBubble({ message }: { message: Message }) {
   const isUser = message.role === 'user'
 
+  // Hide the streaming placeholder until it has something to show
+  if (!isUser && !message.content && !message.tool_calls?.length) {
+    return null
+  }
+
   return (
     <div className="mb-6">
       {/* Tool calls for assistant */}
@@ -95,7 +100,16 @@ function MessageBubble({ message }: { message: Message }) {
           )}
         >
           {isUser ? (
-            <p className="whitespace-pre-wrap">{message.content}</p>
+            <div>
+              {message.imageUrl && (
+                <img
+                  src={message.imageUrl}
+                  alt="Attached"
+                  className="max-h-48 rounded-lg mb-2 border border-blue-400"
+                />
+              )}
+              <p className="whitespace-pre-wrap">{message.content}</p>
+            </div>
           ) : (
             <ReactMarkdown className="prose prose-sm max-w-none" remarkPlugins={[remarkGfm]}>
               {message.content}
@@ -114,6 +128,11 @@ function ToolCallDisplay({ toolCall }: { toolCall: ToolCall }) {
         <div className="flex items-center gap-2 text-gray-600 mb-2">
           <Wrench size={14} />
           <span className="font-medium">{toolCall.tool}</span>
+          {toolCall.agent && (
+            <span className="text-xs bg-blue-100 text-blue-700 rounded-full px-2 py-0.5">
+              {toolCall.agent}
+            </span>
+          )}
         </div>
         {toolCall.args && Object.keys(toolCall.args).length > 0 && (
           <pre className="bg-gray-800 text-gray-200 rounded p-2 text-xs overflow-x-auto mb-2">

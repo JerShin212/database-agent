@@ -12,12 +12,30 @@ export interface Message {
   content: string
   tool_calls?: ToolCall[]
   created_at: string
+  imageUrl?: string // local preview URL for an attached image (not persisted)
+}
+
+export interface ImageAttachment {
+  data: string // base64 without "data:" prefix
+  media_type: string
 }
 
 export interface ToolCall {
   tool: string
   args: Record<string, unknown>
   result: string
+  agent?: string // which worker agent made the call (e.g. database_agent)
+}
+
+export interface ChatStreamEvent {
+  type: 'metadata' | 'content' | 'tool_call' | 'error' | 'done'
+  conversation_id?: string
+  content?: string
+  tool?: string
+  args?: Record<string, unknown>
+  result?: string
+  agent?: string
+  error?: string
 }
 
 export interface Collection {

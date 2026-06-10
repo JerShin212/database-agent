@@ -1,7 +1,9 @@
+import json
 from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
+from sse_starlette.sse import EventSourceResponse
 
 from src.api.deps import get_db
 from src.schemas.chat import ChatRequest, ConversationResponse, MessageResponse
@@ -28,6 +30,8 @@ async def chat(
         conversation_id=request.conversation_id,
         database_id=request.database_id,
         collection_ids=request.collection_ids,
+        image_data=request.image.data if request.image else None,
+        image_media_type=request.image.media_type if request.image else None,
     ):
         chunk_type = chunk.get("type")
         if chunk_type == "metadata":
@@ -49,6 +53,36 @@ async def chat(
         "tool_calls": tool_calls,
         "error": error,
     }
+
+
+@router.post("/stream")
+async def chat_stream(
+    request: ChatRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Process a chat message and stream the response as Server-Sent Events.
+
+    Event types match the framework chunk types: metadata, content,
+    tool_call, error, done. Each event's data is the JSON-encoded chunk.
+    """
+
+    async def event_generator():
+        async for chunk in agent_framework.chat(
+            db=db,
+            message=request.message,
+            conversation_id=request.conversation_id,
+            database_id=request.database_id,
+            collection_ids=request.collection_ids,
+            image_data=request.image.data if request.image else None,
+            image_media_type=request.image.media_type if request.image else None,
+        ):
+            yield {
+                "event": chunk.get("type", "message"),
+                "data": json.dumps(chunk),
+            }
+
+    return EventSourceResponse(event_generator())
 
 
 @router.get("/conversations", response_model=list[ConversationResponse])

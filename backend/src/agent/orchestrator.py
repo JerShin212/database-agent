@@ -36,7 +36,11 @@ class AgentPool:
         agent = self._agents.get(name)
         if agent is None:
             return f"[AgentPool error] No agent named '{name}'. Available: {self.names()}"
-        return agent.run(prompt)
+        try:
+            return agent.run(prompt)
+        except Exception as exc:
+            # A crashed worker must not kill the orchestrator's turn
+            return f"[Worker {name} failed: {exc}]"
 
     def describe(self) -> str:
         lines = []
@@ -49,12 +53,29 @@ class AgentPool:
 # OrchestratorAgent
 # ---------------------------------------------------------------------------
 
+# When a worker reports NO_RESULTS, automatically retry the task with this
+# alternate worker (deterministic SQL <-> RAG fallback).
+_FALLBACK_AGENT = {
+    "database_agent": "text_search_agent",
+    "text_search_agent": "database_agent",
+    "visual_search_agent": "text_search_agent",
+}
+
+# Worker responses starting with this token signal "nothing found"
+NO_RESULTS_TOKEN = "NO_RESULTS"
+
+
 class OrchestratorAgent:
     """
     A coordinator agent that delegates sub-tasks to specialist workers.
 
     The orchestrator's only tool is `delegate(agent, task)` which routes
     to any registered worker in the pool. It never executes tasks itself.
+
+    If a worker's response starts with NO_RESULTS, the delegate handler
+    automatically retries the task with the alternate worker (SQL <-> RAG
+    fallback) and returns both labeled responses for synthesis. Each agent
+    falls back at most once per orchestrator instance (one per request).
     """
 
     def __init__(
@@ -67,6 +88,7 @@ class OrchestratorAgent:
         max_iter: int = 20,
     ) -> None:
         self.pool = pool
+        self._fallbacks_used: set[str] = set()
 
         worker_list = pool.describe()
         default_system = (
@@ -81,6 +103,7 @@ class OrchestratorAgent:
             system=system or default_system,
             max_tokens=max_tokens,
             max_iter=max_iter,
+            name="orchestrator",
         )
 
         # Orchestrator only gets the delegate tool — remove everything else
@@ -107,13 +130,32 @@ class OrchestratorAgent:
         )
 
     def _delegate_handler(self, agent: str, task: str) -> str:
-        return self.pool.run(agent, task)
+        result = self.pool.run(agent, task)
 
-    def run(self, user_input: str) -> str:
+        alternate = _FALLBACK_AGENT.get(agent)
+        if (
+            alternate
+            and result.lstrip().startswith(NO_RESULTS_TOKEN)
+            and agent not in self._fallbacks_used
+        ):
+            self._fallbacks_used.add(agent)
+            alternate_result = self.pool.run(alternate, task)
+            return (
+                f"[{agent}] {result}\n\n"
+                f"[Automatic fallback to {alternate}]\n"
+                f"[{alternate}] {alternate_result}"
+            )
+
+        return result
+
+    def run(self, user_input: str | list[dict[str, Any]]) -> str:
         return self.agent.run(user_input)
 
-    def stream(self, user_input: str) -> Generator[str, None, None]:
-        yield from self.agent.stream(user_input)
+    def run_events(
+        self, user_input: str | list[dict[str, Any]]
+    ) -> Generator[dict[str, Any], None, None]:
+        """Event-stream variant of run() — see AgentRuntime.run_events."""
+        yield from self.agent.run_events(user_input)
 
     def add_tool(self, *args: Any, **kwargs: Any) -> None:
         """Add extra tools to the orchestrator beyond `delegate`."""

@@ -60,7 +60,7 @@ def _execute_sql_sqlite(sql: str, context) -> str:
         return f"Error: {result.error}"
 
     if not result.rows:
-        return "Query returned no results."
+        return "NO_RESULTS: Query returned no results."
 
     # Format as table
     lines = []
@@ -98,7 +98,7 @@ def _execute_sql_connector(sql: str, connector_id: UUID, context) -> str:
         result = db_connector.execute_query(sql, limit=1000)
 
         if not result["rows"]:
-            return "Query returned no results."
+            return "NO_RESULTS: Query returned no results."
 
         # Format as table
         lines = []

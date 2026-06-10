@@ -242,3 +242,22 @@ class SchemaIndexer:
 
 # Singleton instance
 schema_indexer = SchemaIndexer()
+
+
+async def index_connector_schema_background(connector_id: UUID) -> None:
+    """
+    Run schema indexing as a FastAPI background task.
+
+    Opens its own database session because the request-scoped session is
+    closed by the time background tasks execute. Failures are recorded on
+    the connector status by index_connector_schema itself.
+    """
+    from src.db.database import AsyncSessionLocal
+
+    async with AsyncSessionLocal() as session:
+        try:
+            await schema_indexer.index_connector_schema(session, connector_id)
+        except Exception:
+            # Status is already set to "failed" with the error message;
+            # nothing useful to do here beyond not crashing the task runner.
+            pass

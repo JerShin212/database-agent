@@ -94,8 +94,9 @@ class Session:
     input_tokens: int = 0
     output_tokens: int = 0
 
-    def add_user(self, text: str) -> None:
-        self.messages.append({"role": "user", "content": text})
+    def add_user(self, content: str | list[dict[str, Any]]) -> None:
+        """Accepts plain text or a list of content blocks (e.g. image + text)."""
+        self.messages.append({"role": "user", "content": content})
 
     def add_assistant(self, content: list[dict[str, Any]]) -> None:
         self.messages.append({"role": "assistant", "content": content})
@@ -133,20 +134,37 @@ class AgentRuntime:
         system: str = "You are a helpful AI assistant.",
         max_tokens: int = 4096,
         max_iter: int = 10,
+        name: str = "agent",
+        on_event: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         try:
             import anthropic
         except ImportError:
             raise ImportError("Run: pip install anthropic")
 
-        self._client = anthropic.Anthropic(api_key=api_key or os.environ["ANTHROPIC_API_KEY"])
+        self._client = anthropic.Anthropic(
+            api_key=api_key or os.environ["ANTHROPIC_API_KEY"],
+            max_retries=3,
+        )
         self.model = model
         self.system = system
         self.max_tokens = max_tokens
         self.max_iter = max_iter
+        self.name = name
+        # Optional observer for tool-call events; used to surface worker
+        # activity (e.g. "agent used SQL") to the streaming chat UI.
+        self.on_event = on_event
 
         self.registry = ToolRegistry()
         self.session = Session()
+
+    def _emit(self, event: dict[str, Any]) -> None:
+        if self.on_event is None:
+            return
+        try:
+            self.on_event(event)
+        except Exception:
+            pass  # observers must never break the agent loop
 
     def tool(
         self,
@@ -191,10 +209,13 @@ class AgentRuntime:
     def allow_tools(self, *names: str) -> None:
         self.registry.allow(*names)
 
-    def run(self, user_input: str) -> str:
+    def run(self, user_input: str | list[dict[str, Any]]) -> str:
         """
         Run one conversational turn. May call tools multiple times internally.
         Returns the final text response from the model.
+
+        user_input may be plain text or a list of content blocks (e.g. an
+        image block followed by a text block, for vision-capable models).
         """
         self.session.add_user(user_input)
 
@@ -222,6 +243,14 @@ class AgentRuntime:
                         block.name,
                         json.dumps(block.input),
                     )
+                    self._emit({
+                        "type": "tool_call",
+                        "agent": self.name,
+                        "tool": block.name,
+                        "args": block.input,
+                        "result": output[:500],
+                        "is_error": is_error,
+                    })
                     tool_results.append({
                         "type": "tool_result",
                         "tool_use_id": block.id,
@@ -233,8 +262,17 @@ class AgentRuntime:
 
         return "[Max iterations reached without a final response]"
 
-    def stream(self, user_input: str) -> Generator[str, None, None]:
-        """Stream a turn, yielding text chunks as they arrive."""
+    def run_events(
+        self, user_input: str | list[dict[str, Any]]
+    ) -> Generator[dict[str, Any], None, None]:
+        """
+        Run one conversational turn as an event stream. Yields:
+          {"type": "text_delta", "text": str}    — model text as it streams in
+          {"type": "tool_call", "agent": str, "tool": str, "args": dict,
+           "result": str (truncated), "is_error": bool}
+          {"type": "final", "text": str}          — full text of the final message
+          {"type": "max_iterations"}              — loop exhausted without an answer
+        """
         self.session.add_user(user_input)
 
         for _ in range(self.max_iter):
@@ -245,6 +283,8 @@ class AgentRuntime:
                 tools=self.registry.api_specs(),
                 messages=self.session.messages,
             ) as stream:
+                for text in stream.text_stream:
+                    yield {"type": "text_delta", "text": text}
                 response = stream.get_final_message()
 
             self.session.track_usage(response.usage)
@@ -252,9 +292,7 @@ class AgentRuntime:
             self.session.add_assistant(content_blocks)
 
             if response.stop_reason != "tool_use":
-                for block in response.content:
-                    if block.type == "text":
-                        yield block.text
+                yield {"type": "final", "text": self._extract_text(response.content)}
                 return
 
             tool_results = []
@@ -264,6 +302,14 @@ class AgentRuntime:
                         block.name,
                         json.dumps(block.input),
                     )
+                    yield {
+                        "type": "tool_call",
+                        "agent": self.name,
+                        "tool": block.name,
+                        "args": block.input,
+                        "result": output[:500],
+                        "is_error": is_error,
+                    }
                     tool_results.append({
                         "type": "tool_result",
                         "tool_use_id": block.id,
@@ -273,7 +319,7 @@ class AgentRuntime:
 
             self.session.add_tool_results(tool_results)
 
-        yield "[Max iterations reached without a final response]"
+        yield {"type": "max_iterations"}
 
     @staticmethod
     def _block_to_dict(block: Any) -> dict[str, Any]:

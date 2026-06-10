@@ -7,13 +7,13 @@ Handles creating, listing, testing, indexing, and deleting external database con
 from typing import Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.db.database import get_db
 from src.services.connector_service import ConnectorService
-from src.workers.schema_indexer import schema_indexer
+from src.workers.schema_indexer import index_connector_schema_background
 
 
 router = APIRouter()
@@ -175,6 +175,7 @@ async def test_connector(
 @router.post("/connectors/{connector_id}/index")
 async def index_connector_schema(
     connector_id: UUID,
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -203,12 +204,11 @@ async def index_connector_schema(
                 detail=f"Cannot index: Connection test failed - {message}"
             )
 
-        # Start indexing (runs synchronously for now)
-        # In production, this would be a background task
-        await schema_indexer.index_connector_schema(db, connector_id)
+        # Start indexing in the background; poll GET /connectors/{id} for status
+        background_tasks.add_task(index_connector_schema_background, connector_id)
 
         return {
-            "message": "Schema indexing completed",
+            "message": "Schema indexing started",
             "connector_id": str(connector_id),
         }
 

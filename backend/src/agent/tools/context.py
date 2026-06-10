@@ -16,6 +16,8 @@ class ToolContext:
     database_name: Optional[str] = None
     connector_id: Optional[UUID] = None  # For external database connectors
     collection_ids: Optional[list[UUID]] = None
+    image_bytes: Optional[bytes] = None  # User-attached image (decoded), for image search
+    image_media_type: Optional[str] = None
 
 
 # Context variable for async-safe context propagation

@@ -247,8 +247,10 @@ class VectorDBService:
 
             stmt = text(f"""
                 INSERT INTO document_pages
-                (id, document_id, collection_id, page_number, visual_embedding)
-                VALUES (:id, :document_id, :collection_id, :page_number, {embedding_literal})
+                (id, document_id, collection_id, page_number, visual_embedding,
+                 multi_embedding, n_vectors)
+                VALUES (:id, :document_id, :collection_id, :page_number, {embedding_literal},
+                        :multi_embedding, :n_vectors)
             """)
             await self.db.execute(
                 stmt,
@@ -257,6 +259,8 @@ class VectorDBService:
                     "document_id": str(page["document_id"]),
                     "collection_id": str(page["collection_id"]),
                     "page_number": page["page_number"],
+                    "multi_embedding": page.get("multi_embedding"),
+                    "n_vectors": page.get("n_vectors"),
                 },
             )
         await self.db.commit()

@@ -17,7 +17,6 @@ class Settings(BaseSettings):
     sqlite_data_path: str = "./data/sqlite"
 
     # LLM APIs
-    openai_api_key: str = ""
     anthropic_api_key: str = ""
 
     # Encryption
@@ -29,6 +28,7 @@ class Settings(BaseSettings):
     # ColQwen2 visual search (Modal endpoints)
     colqwen2_pdf_endpoint: str = "https://jershin212--daikin-test-colqwen2-embedder-model-embed-pdf.modal.run"
     colqwen2_text_endpoint: str = "https://jershin212--daikin-test-colqwen2-embedder-model-embed-text.modal.run"
+    colqwen2_image_endpoint: str = "https://jershin212--daikin-test-colqwen2-embedder-model-embed-image.modal.run"
     visual_embedding_dimensions: int = 128
 
     # Chunking config

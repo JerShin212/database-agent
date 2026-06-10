@@ -9,6 +9,8 @@ import type {
   ChatResponse,
   Connector,
   SchemaSearchResult,
+  ImageAttachment,
+  ChatStreamEvent,
 } from '../types'
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000'
@@ -27,14 +29,73 @@ export const chatApi = {
     conversationId: string | null,
     collectionIds: string[] | null,
     databaseId: string | null,
+    image?: ImageAttachment | null,
   ): Promise<ChatResponse> {
     const response = await api.post('/api/chat', {
       message,
       conversation_id: conversationId,
       collection_ids: collectionIds,
       database_id: databaseId,
+      image: image || null,
     })
     return response.data
+  },
+
+  /**
+   * Stream a chat message over SSE (fetch + ReadableStream — EventSource
+   * cannot POST a JSON body). Calls onEvent for each parsed event.
+   */
+  async sendMessageStream(
+    message: string,
+    conversationId: string | null,
+    collectionIds: string[] | null,
+    databaseId: string | null,
+    image: ImageAttachment | null,
+    onEvent: (event: ChatStreamEvent) => void,
+  ): Promise<void> {
+    const response = await fetch(`${API_URL}/api/chat/stream`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        message,
+        conversation_id: conversationId,
+        collection_ids: collectionIds,
+        database_id: databaseId,
+        image: image || null,
+      }),
+    })
+
+    if (!response.ok || !response.body) {
+      throw new Error(`Stream request failed: ${response.status}`)
+    }
+
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      // sse-starlette emits \r\n line endings — normalize before splitting
+      buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, '\n')
+
+      // SSE frames are separated by a blank line
+      const frames = buffer.split('\n\n')
+      buffer = frames.pop() || ''
+
+      for (const frame of frames) {
+        const dataLines = frame
+          .split('\n')
+          .filter((line) => line.startsWith('data:'))
+          .map((line) => line.slice(5).trim())
+        if (dataLines.length === 0) continue
+        try {
+          onEvent(JSON.parse(dataLines.join('')))
+        } catch {
+          // Skip malformed frames (e.g. SSE comments/pings)
+        }
+      }
+    }
   },
 
   async getConversations(): Promise<Conversation[]> {

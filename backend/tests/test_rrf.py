@@ -222,5 +222,33 @@ def test_rrf_real_world_scenario():
     assert all("score" in item for item in result)
 
 
+def test_rrf_page_id_fusion_image_and_text():
+    """Fusion case used by search_by_image: image + text page searches keyed by page_id."""
+    from src.services.rrf import reciprocal_rank_fusion as rrf_service
+
+    image_results = [
+        {"page_id": "p1", "filename": "manual.pdf", "page_number": 3, "score": 0.91},
+        {"page_id": "p2", "filename": "manual.pdf", "page_number": 7, "score": 0.85},
+    ]
+    text_results = [
+        {"page_id": "p2", "filename": "manual.pdf", "page_number": 7, "score": 0.70},
+        {"page_id": "p3", "filename": "specs.pdf", "page_number": 1, "score": 0.65},
+    ]
+
+    fused = rrf_service(
+        result_lists=[image_results, text_results],
+        key_fn=lambda x: x["page_id"],
+        k=60,
+    )
+
+    # p2 appears in both lists and must rank first
+    assert fused[0]["page_id"] == "p2"
+    assert len(fused) == 3
+    # Metadata from the first occurrence is preserved
+    assert fused[0]["page_number"] == 7
+    assert all("score" in item for item in fused)
+
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

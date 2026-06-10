@@ -35,7 +35,7 @@ class VisualDocumentProcessor:
             return
 
         try:
-            page_embeddings = await colqwen2_client.embed_pdf(pdf_bytes, filename)
+            page_embeddings = await colqwen2_client.embed_pdf_full(pdf_bytes, filename)
         except Exception as exc:
             print(f"[VisualDocumentProcessor] ColQwen2 failed for {filename}: {exc}")
             return
@@ -43,15 +43,20 @@ class VisualDocumentProcessor:
         if not page_embeddings:
             return
 
-        page_records = [
-            {
+        import numpy as np
+
+        page_records = []
+        for page_num, (pooled, multi_vector) in enumerate(page_embeddings, start=1):
+            multi_arr = np.array(multi_vector, dtype=np.float16)
+            page_records.append({
                 "id": uuid4(),
                 "document_id": document_id,
                 "collection_id": collection_id,
                 "page_number": page_num,
-                "visual_embedding": embedding,
-            }
-            for page_num, embedding in enumerate(page_embeddings, start=1)
-        ]
+                "visual_embedding": pooled,
+                # float16 row-major bytes for MaxSim rerank
+                "multi_embedding": multi_arr.tobytes(),
+                "n_vectors": multi_arr.shape[0],
+            })
 
         await self.vector_db.insert_pages(page_records)

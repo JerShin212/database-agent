@@ -1,6 +1,6 @@
 from uuid import UUID
 from pathlib import Path
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile, File
 from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -16,7 +16,7 @@ from src.models.database import SQLiteDatabase
 from src.models.user import User
 from src.services.connector_service import ConnectorService
 from src.services.sqlite_service import sqlite_service
-from src.workers.schema_indexer import schema_indexer
+from src.workers.schema_indexer import index_connector_schema_background
 
 router = APIRouter()
 
@@ -24,6 +24,7 @@ router = APIRouter()
 @router.post("", response_model=DatabaseResponse)
 async def create_sample_database_endpoint(
     data: DatabaseCreate,
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
 ):
     """Create a sample database."""
@@ -53,37 +54,43 @@ async def create_sample_database_endpoint(
     await db.commit()
     await db.refresh(database)
 
-    # Automatically create a connector and trigger semantic indexing
-    try:
-        # Get default user
-        result = await db.execute(select(User).where(User.username == "default"))
-        default_user = result.scalar_one_or_none()
-
-        if default_user:
-            # Create connector for the SQLite database
-            connector_service = ConnectorService(db)
-            connection_string = f"sqlite:///{full_path}"
-
-            connector = await connector_service.create_connector(
-                user_id=default_user.id,
-                name=f"{data.name} (Semantic Catalog)",
-                db_type="sqlite",
-                connection_string=connection_string,
-            )
-
-            # Trigger schema indexing in the background
-            # Note: This runs synchronously but updates status in DB
-            await schema_indexer.index_connector_schema(db, connector.id)
-
-    except Exception as e:
-        # Log error but don't fail database creation
-        print(f"Warning: Failed to create connector for sample database: {e}")
+    await _create_connector_and_index(db, background_tasks, data.name, full_path)
 
     return database
 
 
+async def _create_connector_and_index(
+    db: AsyncSession,
+    background_tasks: BackgroundTasks,
+    name: str,
+    full_path: Path,
+) -> None:
+    """Create a semantic-catalog connector for a SQLite file and schedule indexing."""
+    try:
+        result = await db.execute(select(User).where(User.username == "default"))
+        default_user = result.scalar_one_or_none()
+
+        if default_user:
+            connector_service = ConnectorService(db)
+            connector = await connector_service.create_connector(
+                user_id=default_user.id,
+                name=f"{name} (Semantic Catalog)",
+                db_type="sqlite",
+                connection_string=f"sqlite:///{full_path}",
+            )
+
+            # Indexing runs after the response returns; the task opens its
+            # own DB session and tracks progress on the connector.
+            background_tasks.add_task(index_connector_schema_background, connector.id)
+
+    except Exception as e:
+        # Log error but don't fail database creation
+        print(f"Warning: Failed to create connector for database '{name}': {e}")
+
+
 @router.post("/upload", response_model=DatabaseResponse)
 async def upload_database(
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     name: str = None,
     description: str = None,
@@ -114,6 +121,8 @@ async def upload_database(
     db.add(database)
     await db.commit()
     await db.refresh(database)
+
+    await _create_connector_and_index(db, background_tasks, database.name, full_path)
 
     return database
 

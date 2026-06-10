@@ -6,7 +6,6 @@ import { useSettingsStore } from '../stores/settingsStore'
 import { useCollectionsStore } from '../stores/collectionsStore'
 import { useDatabasesStore } from '../stores/databasesStore'
 import { Database, FolderOpen, X } from 'lucide-react'
-import clsx from 'clsx'
 
 export default function ChatPage() {
   const { error, clearError } = useChatStore()

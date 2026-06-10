@@ -41,6 +41,7 @@ from src.agent.tools import (
     list_collections,
     search_schema_catalog,
     search_visual_documents,
+    search_by_image,
     ToolContext,
     set_tool_context,
 )
@@ -60,13 +61,15 @@ class DatabaseAgentFramework:
     # Worker builders
     # ------------------------------------------------------------------
 
-    def _build_database_worker(self, api_key: str) -> AgentRuntime:
+    def _build_database_worker(self, api_key: str, on_event=None) -> AgentRuntime:
         worker = AgentRuntime(
             api_key=api_key,
             model=_WORKER_MODEL,
             system=DATABASE_AGENT_PROMPT,
             max_tokens=4096,
             max_iter=10,
+            name="database_agent",
+            on_event=on_event,
         )
         worker.deny_tools(*_BUILTIN_TOOLS)
         worker.add_tool(
@@ -113,13 +116,15 @@ class DatabaseAgentFramework:
         )
         return worker
 
-    def _build_text_worker(self, api_key: str) -> AgentRuntime:
+    def _build_text_worker(self, api_key: str, on_event=None) -> AgentRuntime:
         worker = AgentRuntime(
             api_key=api_key,
             model=_WORKER_MODEL,
             system=TEXT_SEARCH_AGENT_PROMPT,
             max_tokens=4096,
             max_iter=6,
+            name="text_search_agent",
+            on_event=on_event,
         )
         worker.deny_tools(*_BUILTIN_TOOLS)
         worker.add_tool(
@@ -141,13 +146,15 @@ class DatabaseAgentFramework:
         )
         return worker
 
-    def _build_visual_worker(self, api_key: str) -> AgentRuntime:
+    def _build_visual_worker(self, api_key: str, on_event=None) -> AgentRuntime:
         worker = AgentRuntime(
             api_key=api_key,
             model=_WORKER_MODEL,
             system=VISUAL_SEARCH_AGENT_PROMPT,
             max_tokens=4096,
             max_iter=6,
+            name="visual_search_agent",
+            on_event=on_event,
         )
         worker.deny_tools(*_BUILTIN_TOOLS)
         worker.add_tool(
@@ -161,6 +168,16 @@ class DatabaseAgentFramework:
             required=["query"],
         )
         worker.add_tool(
+            "search_by_image",
+            search_by_image.__doc__ or "Search document pages using the user's attached image",
+            search_by_image,
+            params={
+                "text_query": {"type": "string", "description": "Optional short description of the image content, used to fuse a text search with the image search"},
+                "limit": {"type": "integer", "description": "Max results (default 5)"},
+            },
+            required=[],
+        )
+        worker.add_tool(
             "list_collections",
             list_collections.__doc__ or "List all document collections",
             list_collections,
@@ -169,11 +186,11 @@ class DatabaseAgentFramework:
         )
         return worker
 
-    def _build_orchestrator(self, api_key: str) -> OrchestratorAgent:
+    def _build_orchestrator(self, api_key: str, on_event=None) -> OrchestratorAgent:
         pool = AgentPool()
-        pool.register("database_agent", self._build_database_worker(api_key))
-        pool.register("text_search_agent", self._build_text_worker(api_key))
-        pool.register("visual_search_agent", self._build_visual_worker(api_key))
+        pool.register("database_agent", self._build_database_worker(api_key, on_event))
+        pool.register("text_search_agent", self._build_text_worker(api_key, on_event))
+        pool.register("visual_search_agent", self._build_visual_worker(api_key, on_event))
 
         return OrchestratorAgent(
             pool=pool,
@@ -195,6 +212,8 @@ class DatabaseAgentFramework:
         conversation_id: UUID = None,
         database_id: UUID = None,
         collection_ids: list[UUID] = None,
+        image_data: str = None,
+        image_media_type: str = None,
     ) -> AsyncGenerator[dict, None]:
         """
         Process a chat message and yield response components.
@@ -249,6 +268,15 @@ class DatabaseAgentFramework:
                     connector_id = connector.id
 
         # --- 2. Set ToolContext — propagates to worker tools via ContextVar ---
+        image_bytes = None
+        if image_data:
+            import base64
+            try:
+                image_bytes = base64.b64decode(image_data)
+            except Exception:
+                yield {"type": "error", "error": "Invalid base64 image data"}
+                return
+
         context = ToolContext(
             db=db,
             database_id=database_id,
@@ -256,6 +284,8 @@ class DatabaseAgentFramework:
             database_name=db_name,
             connector_id=connector_id,
             collection_ids=collection_ids,
+            image_bytes=image_bytes,
+            image_media_type=image_media_type or "image/png",
         )
         set_tool_context(context)
         import logging as _logging
@@ -295,11 +325,12 @@ class DatabaseAgentFramework:
         messages = result.scalars().all()
         is_initial = len(messages) == 0
 
-        # Save user message to DB
+        # Save user message to DB (don't store base64 — just note the attachment
+        # so the image is reflected in conversation history on later turns)
         user_message = Message(
             conversation_id=conversation_id,
             role="user",
-            content=message,
+            content=f"[Image attached]\n{message}" if image_bytes else message,
         )
         db.add(user_message)
         await db.commit()
@@ -317,33 +348,92 @@ class DatabaseAgentFramework:
                 f"[Previous conversation]\n{history_text}\n\n[User]: {message}"
             )
 
-        # --- 6. Run orchestrator in thread pool (sync → async, non-blocking) ---
+        # When an image is attached, the vision-capable orchestrator sees it
+        # directly: it can describe the image for routing and pass that
+        # description to search_by_image as a fusion text query.
+        if image_bytes:
+            orchestrator_input: str | list = [
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": image_media_type or "image/png",
+                        "data": image_data,
+                    },
+                },
+                {"type": "text", "text": f"[The user attached the image above]\n\n{full_prompt}"},
+            ]
+        else:
+            orchestrator_input = full_prompt
+
+        # --- 6. Run orchestrator in thread pool, streaming events back ---
+        # The orchestrator runs synchronously in an executor thread and pushes
+        # events into an asyncio queue via call_soon_threadsafe; this async
+        # generator drains the queue until a None sentinel arrives.
         try:
-            orchestrator = self._build_orchestrator(settings.anthropic_api_key)
+            loop = asyncio.get_running_loop()
+            queue: asyncio.Queue = asyncio.Queue()
+
+            def _emit(event: dict | None) -> None:
+                loop.call_soon_threadsafe(queue.put_nowait, event)
+
+            orchestrator = self._build_orchestrator(settings.anthropic_api_key, on_event=_emit)
 
             # Capture context in closure so it's explicitly re-set inside the thread.
             # This is more reliable than relying solely on ContextVar copy_context()
             # propagation through run_in_executor inside an async generator.
             _ctx = context
 
-            def _run_orchestrator() -> str:
+            def _run_orchestrator() -> None:
                 set_tool_context(_ctx)
-                return orchestrator.run(full_prompt)
+                try:
+                    for event in orchestrator.run_events(orchestrator_input):
+                        _emit(event)
+                except Exception as exc:
+                    _emit({"type": "error", "error": str(exc)})
+                finally:
+                    _emit(None)  # sentinel: orchestrator finished
 
-            loop = asyncio.get_running_loop()
-            answer = await loop.run_in_executor(None, _run_orchestrator)
+            future = loop.run_in_executor(None, _run_orchestrator)
 
-            yield {
-                "type": "content",
-                "content": answer,
-            }
+            answer_parts: list[str] = []
+            tool_calls: list[dict] = []
+
+            while (event := await queue.get()) is not None:
+                event_type = event.get("type")
+                if event_type == "text_delta":
+                    answer_parts.append(event["text"])
+                    yield {"type": "content", "content": event["text"]}
+                elif event_type == "tool_call":
+                    call = {
+                        "tool": event["tool"],
+                        "args": event["args"],
+                        "result": event["result"],
+                        "agent": event.get("agent"),
+                    }
+                    tool_calls.append(call)
+                    yield {"type": "tool_call", **call}
+                elif event_type == "max_iterations":
+                    notice = (
+                        "\n\nI couldn't fully complete this within my step limit — "
+                        "here's what I found so far."
+                    )
+                    answer_parts.append(notice)
+                    yield {"type": "content", "content": notice}
+                elif event_type == "error":
+                    yield {"type": "error", "error": event["error"]}
+                # "final" carries the last message's full text, which has
+                # already been streamed as text_delta chunks — skip it.
+
+            await future
+            answer = "".join(answer_parts)
 
             # Save assistant message
             assistant_message = Message(
                 conversation_id=conversation_id,
                 role="assistant",
                 content=answer,
-                tool_calls=None,
+                tool_calls=tool_calls or None,
             )
             db.add(assistant_message)
             await db.commit()

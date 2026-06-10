@@ -4,11 +4,17 @@ from uuid import UUID
 from pydantic import BaseModel
 
 
+class ImageAttachment(BaseModel):
+    data: str  # base64-encoded image bytes (no "data:" prefix)
+    media_type: str = "image/png"  # image/png, image/jpeg, image/webp, image/gif
+
+
 class ChatRequest(BaseModel):
     message: str
     conversation_id: Optional[UUID] = None
     collection_ids: Optional[list[UUID]] = None
     database_id: Optional[UUID] = None
+    image: Optional[ImageAttachment] = None
 
 
 class ChatResponse(BaseModel):

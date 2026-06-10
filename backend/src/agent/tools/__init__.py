@@ -8,6 +8,7 @@ from src.agent.tools.search_tools import (
     search_collections,
     list_collections,
     search_visual_documents,
+    search_by_image,
 )
 from src.agent.tools.schema_tools import (
     search_schema_catalog,
@@ -22,6 +23,7 @@ __all__ = [
     "search_collections",
     "list_collections",
     "search_visual_documents",
+    "search_by_image",
     "search_schema_catalog",
     "ToolContext",
     "set_tool_context",

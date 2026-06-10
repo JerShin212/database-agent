@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import type { Conversation, Message } from '../types'
+import type { Conversation, Message, ImageAttachment } from '../types'
 import { chatApi } from '../services/api'
 
 interface ChatState {
@@ -17,7 +17,8 @@ interface ChatState {
   sendMessage: (
     message: string,
     collectionIds?: string[],
-    databaseId?: string
+    databaseId?: string,
+    image?: ImageAttachment | null
   ) => Promise<void>
   clearError: () => void
 }
@@ -72,7 +73,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
-  sendMessage: async (message: string, collectionIds?: string[], databaseId?: string) => {
+  sendMessage: async (
+    message: string,
+    collectionIds?: string[],
+    databaseId?: string,
+    image?: ImageAttachment | null
+  ) => {
     const { currentConversation, messages } = get()
 
     // Add user message optimistically
@@ -81,48 +87,79 @@ export const useChatStore = create<ChatState>((set, get) => ({
       role: 'user',
       content: message,
       created_at: new Date().toISOString(),
+      imageUrl: image ? `data:${image.media_type};base64,${image.data}` : undefined,
+    }
+
+    // Placeholder assistant message, filled in live as events stream in
+    const assistantId = `msg-${Date.now()}`
+    const assistantMessage: Message = {
+      id: assistantId,
+      role: 'assistant',
+      content: '',
+      created_at: new Date().toISOString(),
     }
 
     set({
-      messages: [...messages, userMessage],
+      messages: [...messages, userMessage, assistantMessage],
       isLoading: true,
       error: null,
     })
 
+    const updateAssistant = (update: (msg: Message) => Message) => {
+      set({
+        messages: get().messages.map((m) => (m.id === assistantId ? update(m) : m)),
+      })
+    }
+
+    let conversationId: string | null = null
+    let streamError: string | null = null
+
     try {
-      const response = await chatApi.sendMessage(
+      await chatApi.sendMessageStream(
         message,
         currentConversation?.id || null,
         collectionIds || null,
         databaseId || null,
+        image || null,
+        (event) => {
+          if (event.type === 'metadata' && event.conversation_id) {
+            conversationId = event.conversation_id
+          } else if (event.type === 'content' && event.content) {
+            updateAssistant((m) => ({ ...m, content: m.content + event.content }))
+          } else if (event.type === 'tool_call' && event.tool) {
+            updateAssistant((m) => ({
+              ...m,
+              tool_calls: [
+                ...(m.tool_calls || []),
+                {
+                  tool: event.tool!,
+                  args: event.args || {},
+                  result: event.result || '',
+                  agent: event.agent,
+                },
+              ],
+            }))
+          } else if (event.type === 'error' && event.error) {
+            streamError = event.error
+          }
+        },
       )
 
-      if (response.error) {
-        set({ error: response.error, isLoading: false })
+      if (streamError) {
+        set({ error: streamError, isLoading: false })
         return
       }
 
-      const assistantMessage: Message = {
-        id: `msg-${Date.now()}`,
-        role: 'assistant',
-        content: response.content,
-        tool_calls: response.tool_calls.length > 0 ? response.tool_calls : undefined,
-        created_at: new Date().toISOString(),
-      }
-
-      set({
-        messages: [...get().messages, assistantMessage],
-        isLoading: false,
-      })
+      set({ isLoading: false })
 
       // Reload conversations to get updated list
       get().loadConversations()
 
       // Update current conversation
-      if (response.conversation_id) {
+      if (conversationId) {
         set({
           currentConversation: {
-            id: response.conversation_id,
+            id: conversationId,
             title: message.slice(0, 50),
             created_at: new Date().toISOString(),
             updated_at: new Date().toISOString(),
@@ -130,7 +167,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
         })
       }
     } catch (error) {
+      // Drop the empty placeholder on transport failure
       set({
+        messages: get().messages.filter(
+          (m) => m.id !== assistantId || m.content || m.tool_calls?.length
+        ),
         isLoading: false,
         error: 'Failed to send message',
       })

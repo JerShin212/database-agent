@@ -9,14 +9,12 @@ export default function CollectionsPage() {
     selectedCollection,
     documents,
     isLoading,
-    error,
     loadCollections,
     createCollection,
     selectCollection,
     deleteCollection,
     uploadDocuments,
     deleteDocument,
-    clearError,
   } = useCollectionsStore()
 
   const [showCreateModal, setShowCreateModal] = useState(false)
