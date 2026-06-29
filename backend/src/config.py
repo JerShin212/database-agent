@@ -22,6 +22,16 @@ class Settings(BaseSettings):
     # Encryption
     encryption_key: str = ""  # Fernet key for encrypting connection strings
 
+    # Shared secret for module-to-module integration endpoints (X-API-Key).
+    # Empty string disables the integration endpoints (403).
+    integration_api_key: str = ""
+
+    # Form-filling module integration. When form_catalog_url is set, the form
+    # catalog is fetched from that module's REST API (GET {url}/forms);
+    # otherwise the local mock JSON file is used.
+    form_catalog_url: str = ""
+    form_catalog_path: str = "./data/forms.json"
+
     # Embedding dimensions (ColQwen2 text embeddings)
     embedding_dimensions: int = 128
 
@@ -31,9 +41,12 @@ class Settings(BaseSettings):
     colqwen2_image_endpoint: str = "https://jershin212--daikin-test-colqwen2-embedder-model-embed-image.modal.run"
     visual_embedding_dimensions: int = 128
 
-    # Chunking config
-    chunk_size: int = 500
-    chunk_overlap: int = 50
+    # Chunking config — ~1500 chars keeps paragraphs intact (the chunker
+    # splits on \n\n first and only recurses finer when a split exceeds
+    # chunk_size). Documents uploaded before this change should be
+    # re-uploaded to benefit.
+    chunk_size: int = 1500
+    chunk_overlap: int = 200
 
     # Backend
     backend_host: str = "0.0.0.0"

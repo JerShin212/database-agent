@@ -8,8 +8,80 @@ When semantic definitions are available from the schema catalog, they're include
 from uuid import UUID
 
 from src.agent.tools.context import get_tool_context
-from src.services.connector_service import ConnectorService
 from src.services.sqlite_service import sqlite_service
+
+# Markers of SQL errors the agent can fix itself given the right context
+_FIXABLE_ERROR_MARKERS = (
+    "no such table",
+    "no such column",
+    "syntax error",
+    "does not exist",       # PostgreSQL: relation/column does not exist
+    "unknown column",       # MySQL
+    "unknown table",        # MySQL
+)
+
+_DIALECT_HINTS = {
+    "sqlite": (
+        "This database is SQLite — use strftime() for dates, || for string "
+        "concatenation, LIMIT (not TOP), and avoid RIGHT/FULL OUTER JOIN."
+    ),
+    "postgresql": (
+        "This database is PostgreSQL — use date_trunc()/TO_CHAR() for dates, "
+        "|| for concatenation, ILIKE for case-insensitive matching, and "
+        "double quotes only for case-sensitive identifiers."
+    ),
+    "mysql": (
+        "This database is MySQL — use DATE_FORMAT() for dates, CONCAT() "
+        "instead of ||, and backticks for reserved-word identifiers."
+    ),
+}
+
+
+def _fetch_connector_sync(connector_id: UUID):
+    """Fetch a Connector row on a fresh sync session.
+
+    Tool handlers run in worker threads (possibly several concurrently), so
+    they must not share the request's AsyncSession — each call opens its own
+    short-lived sync session, mirroring search_tools.py.
+    """
+    from sqlalchemy import select
+    from src.db.database import SyncSessionLocal
+    from src.models.connector import Connector
+
+    with SyncSessionLocal() as db:
+        return db.execute(
+            select(Connector).where(Connector.id == connector_id)
+        ).scalar_one_or_none()
+
+
+def _build_database_connector(connector):
+    """Build a DatabaseConnector with the decrypted connection string."""
+    from src.services.database_connector import DatabaseConnector
+    from src.utils.encryption import encryption_service
+
+    return DatabaseConnector(encryption_service.decrypt(connector.connection_string))
+
+
+def _is_fixable_sql_error(error: str) -> bool:
+    lowered = error.lower()
+    return any(marker in lowered for marker in _FIXABLE_ERROR_MARKERS)
+
+
+def _enrich_sqlite_error(error: str, context) -> str:
+    """Append dialect + schema hints so the agent can correct itself in one retry."""
+    parts = [f"Error: {error}", f"Hint: {_DIALECT_HINTS['sqlite']}"]
+    lowered = error.lower()
+    if "no such table" in lowered or "no such column" in lowered:
+        try:
+            tables = sqlite_service.list_tables(context.database_path)
+            names = ", ".join(t["name"] for t in tables)
+            parts.append(
+                f"Available tables: {names}. "
+                "Call get_table_info(<table>) to confirm exact column names."
+            )
+        except Exception:
+            pass
+    return "\n".join(parts)
 
 
 def execute_sql_query(sql: str, database_id: str = None, connector_id: str = None) -> str:
@@ -57,6 +129,8 @@ def _execute_sql_sqlite(sql: str, context) -> str:
     result = sqlite_service.execute_query(context.database_path, sql)
 
     if result.error:
+        if _is_fixable_sql_error(result.error):
+            return _enrich_sqlite_error(result.error, context)
         return f"Error: {result.error}"
 
     if not result.rows:
@@ -77,13 +151,9 @@ def _execute_sql_sqlite(sql: str, context) -> str:
 
 def _execute_sql_connector(sql: str, connector_id: UUID, context) -> str:
     """Execute SQL on external connector database."""
+    connector = None
     try:
-        # Get connector service
-        connector_service = ConnectorService(context.db)
-
-        # Get connector (need to run async)
-        import asyncio
-        connector = asyncio.run(connector_service.get_connector(connector_id))
+        connector = _fetch_connector_sync(connector_id)
 
         if not connector:
             return f"Error: Connector {connector_id} not found"
@@ -91,8 +161,7 @@ def _execute_sql_connector(sql: str, connector_id: UUID, context) -> str:
         if connector.status != "ready":
             return f"Error: Connector '{connector.name}' is not ready (status: {connector.status})"
 
-        # Get database connector
-        db_connector = connector_service.get_database_connector(connector)
+        db_connector = _build_database_connector(connector)
 
         # Execute query
         result = db_connector.execute_query(sql, limit=1000)
@@ -113,7 +182,13 @@ def _execute_sql_connector(sql: str, connector_id: UUID, context) -> str:
         return "\n".join(lines)
 
     except Exception as e:
-        return f"Error executing query: {str(e)}"
+        message = f"Error executing query: {str(e)}"
+        if connector is not None and _is_fixable_sql_error(str(e)):
+            hint = _DIALECT_HINTS.get((connector.db_type or "").lower())
+            if hint:
+                message += f"\nHint: {hint}"
+            message += "\nCall list_tables or get_table_info to verify table and column names."
+        return message
 
 
 def get_database_schema(database_id: str = None, connector_id: str = None) -> str:
@@ -185,26 +260,21 @@ def _get_schema_sqlite(context) -> str:
 def _get_schema_connector(connector_id: UUID, context) -> str:
     """Get schema for external connector from semantic catalog."""
     try:
-        import asyncio
         from sqlalchemy import select
-        from src.models.connector import Connector, SchemaDefinition
+        from src.db.database import SyncSessionLocal
+        from src.models.connector import SchemaDefinition
 
-        # Get connector
-        connector_service = ConnectorService(context.db)
-        connector = asyncio.run(connector_service.get_connector(connector_id))
+        connector = _fetch_connector_sync(connector_id)
 
         if not connector:
             return f"Error: Connector {connector_id} not found"
 
         # Fetch schema definitions from catalog
-        async def fetch_schema():
+        with SyncSessionLocal() as db:
             stmt = select(SchemaDefinition).where(
                 SchemaDefinition.connector_id == connector_id
             ).order_by(SchemaDefinition.table_name, SchemaDefinition.definition_type)
-            result = await context.db.execute(stmt)
-            return list(result.scalars().all())
-
-        definitions = asyncio.run(fetch_schema())
+            definitions = list(db.execute(stmt).scalars().all())
 
         if not definitions:
             return f"Error: No schema definitions found for connector '{connector.name}'. Has it been indexed?"
@@ -299,19 +369,17 @@ def _list_tables_sqlite(context) -> str:
 def _list_tables_connector(connector_id: UUID, context) -> str:
     """List tables in external connector."""
     try:
-        import asyncio
         from sqlalchemy import select, func
-        from src.models.connector import Connector, SchemaDefinition
+        from src.db.database import SyncSessionLocal
+        from src.models.connector import SchemaDefinition
 
-        # Get connector
-        connector_service = ConnectorService(context.db)
-        connector = asyncio.run(connector_service.get_connector(connector_id))
+        connector = _fetch_connector_sync(connector_id)
 
         if not connector:
             return f"Error: Connector {connector_id} not found"
 
         # Get table definitions
-        async def fetch_tables():
+        with SyncSessionLocal() as db:
             stmt = select(
                 SchemaDefinition.table_name,
                 func.count(SchemaDefinition.id).label("column_count")
@@ -320,10 +388,7 @@ def _list_tables_connector(connector_id: UUID, context) -> str:
                 SchemaDefinition.definition_type == "column"
             ).group_by(SchemaDefinition.table_name).order_by(SchemaDefinition.table_name)
 
-            result = await context.db.execute(stmt)
-            return result.fetchall()
-
-        tables = asyncio.run(fetch_tables())
+            tables = db.execute(stmt).fetchall()
 
         if not tables:
             return f"No tables found in connector '{connector.name}'."
@@ -407,27 +472,22 @@ def _get_table_info_sqlite(table_name: str, context) -> str:
 def _get_table_info_connector(table_name: str, connector_id: UUID, context) -> str:
     """Get table info from external connector with semantic definitions."""
     try:
-        import asyncio
         from sqlalchemy import select
-        from src.models.connector import Connector, SchemaDefinition
+        from src.db.database import SyncSessionLocal
+        from src.models.connector import SchemaDefinition
 
-        # Get connector
-        connector_service = ConnectorService(context.db)
-        connector = asyncio.run(connector_service.get_connector(connector_id))
+        connector = _fetch_connector_sync(connector_id)
 
         if not connector:
             return f"Error: Connector {connector_id} not found"
 
         # Fetch schema definitions for this table
-        async def fetch_table_definitions():
+        with SyncSessionLocal() as db:
             stmt = select(SchemaDefinition).where(
                 SchemaDefinition.connector_id == connector_id,
                 SchemaDefinition.table_name == table_name
             ).order_by(SchemaDefinition.definition_type)
-            result = await context.db.execute(stmt)
-            return list(result.scalars().all())
-
-        definitions = asyncio.run(fetch_table_definitions())
+            definitions = list(db.execute(stmt).scalars().all())
 
         if not definitions:
             return f"Table '{table_name}' not found in connector '{connector.name}'."

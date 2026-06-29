@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import threading
+from collections import OrderedDict
+
 import numpy as np
 import httpx
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_fixed
@@ -38,10 +41,17 @@ class ColQwen2Client:
     synchronous context. Async methods are used by the document processor.
     """
 
+    # Query embeddings are deterministic per text — cache them so worker
+    # retries and SQL<->RAG fallbacks don't pay a Modal round-trip
+    # (cold starts run 30-60s) for a query already embedded this process.
+    _TEXT_CACHE_MAX = 256
+
     def __init__(self) -> None:
         self.pdf_endpoint = settings.colqwen2_pdf_endpoint
         self.text_endpoint = settings.colqwen2_text_endpoint
         self.image_endpoint = settings.colqwen2_image_endpoint
+        self._text_cache: OrderedDict[str, list[list[float]]] = OrderedDict()
+        self._text_cache_lock = threading.Lock()
 
     def _mean_pool(self, embedding: list) -> list[float]:
         """Mean-pool a 2D multi-vector (n_tokens, 128) → (128,) or pass through 1D."""
@@ -51,17 +61,36 @@ class ColQwen2Client:
         return arr.tolist()
 
     @_retry_on_http_error
-    def embed_text_multivector_sync(self, text: str) -> list[list[float]]:
-        """
-        Synchronously embed a query string and return the full multi-vector
-        (n_query_tokens, 128), or [] if endpoint not configured.
-        """
-        if not self.text_endpoint:
-            return []
+    def _fetch_text_multivector_sync(self, text: str) -> list[list[float]]:
+        """Uncached Modal round-trip for a text multi-vector."""
         with httpx.Client(timeout=120.0) as client:
             resp = client.post(self.text_endpoint, json={"text": text})
             resp.raise_for_status()
             return resp.json()["embeddings"]
+
+    def embed_text_multivector_sync(self, text: str) -> list[list[float]]:
+        """
+        Synchronously embed a query string and return the full multi-vector
+        (n_query_tokens, 128), or [] if endpoint not configured.
+        Results are LRU-cached per query text.
+        """
+        if not self.text_endpoint:
+            return []
+
+        with self._text_cache_lock:
+            cached = self._text_cache.get(text)
+            if cached is not None:
+                self._text_cache.move_to_end(text)
+                return cached
+
+        result = self._fetch_text_multivector_sync(text)
+
+        if result:
+            with self._text_cache_lock:
+                self._text_cache[text] = result
+                if len(self._text_cache) > self._TEXT_CACHE_MAX:
+                    self._text_cache.popitem(last=False)
+        return result
 
     def embed_text_sync(self, text: str) -> list[float]:
         """

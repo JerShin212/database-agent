@@ -42,12 +42,23 @@ from src.agent.tools import (
     search_schema_catalog,
     search_visual_documents,
     search_by_image,
+    create_chart,
+    CHART_SUCCESS_PREFIX,
+    read_document,
     ToolContext,
     set_tool_context,
+)
+from src.agent.tools.form_tools import (
+    FORM_SUGGESTION_PREFIX,
+    build_suggest_form_description,
+    suggest_form,
 )
 
 _WORKER_MODEL = "claude-haiku-4-5-20251001"
 _ORCHESTRATOR_MODEL = "claude-sonnet-4-6"
+# Workers are rebuilt on this model when the Haiku attempt crashes or runs
+# out of iterations (see OrchestratorAgent._should_escalate)
+_ESCALATION_MODEL = "claude-sonnet-4-6"
 _BUILTIN_TOOLS = ("read_file", "write_file", "bash", "list_directory")
 
 
@@ -61,10 +72,10 @@ class DatabaseAgentFramework:
     # Worker builders
     # ------------------------------------------------------------------
 
-    def _build_database_worker(self, api_key: str, on_event=None) -> AgentRuntime:
+    def _build_database_worker(self, api_key: str, on_event=None, model: str = _WORKER_MODEL) -> AgentRuntime:
         worker = AgentRuntime(
             api_key=api_key,
-            model=_WORKER_MODEL,
+            model=model,
             system=DATABASE_AGENT_PROMPT,
             max_tokens=4096,
             max_iter=10,
@@ -116,13 +127,13 @@ class DatabaseAgentFramework:
         )
         return worker
 
-    def _build_text_worker(self, api_key: str, on_event=None) -> AgentRuntime:
+    def _build_text_worker(self, api_key: str, on_event=None, model: str = _WORKER_MODEL) -> AgentRuntime:
         worker = AgentRuntime(
             api_key=api_key,
-            model=_WORKER_MODEL,
+            model=model,
             system=TEXT_SEARCH_AGENT_PROMPT,
             max_tokens=4096,
-            max_iter=6,
+            max_iter=8,  # search -> read_document (xN) -> synthesize
             name="text_search_agent",
             on_event=on_event,
         )
@@ -138,6 +149,17 @@ class DatabaseAgentFramework:
             required=["query"],
         )
         worker.add_tool(
+            "read_document",
+            read_document.__doc__ or "Read a document's full extracted text (paginated)",
+            read_document,
+            params={
+                "filename": {"type": "string", "description": "Document filename (partial match allowed)"},
+                "start_char": {"type": "integer", "description": "Character offset to start from (default 0)"},
+                "length": {"type": "integer", "description": "Characters to return (default 15000, max 20000)"},
+            },
+            required=["filename"],
+        )
+        worker.add_tool(
             "list_collections",
             list_collections.__doc__ or "List all document collections",
             list_collections,
@@ -146,10 +168,10 @@ class DatabaseAgentFramework:
         )
         return worker
 
-    def _build_visual_worker(self, api_key: str, on_event=None) -> AgentRuntime:
+    def _build_visual_worker(self, api_key: str, on_event=None, model: str = _WORKER_MODEL) -> AgentRuntime:
         worker = AgentRuntime(
             api_key=api_key,
-            model=_WORKER_MODEL,
+            model=model,
             system=VISUAL_SEARCH_AGENT_PROMPT,
             max_tokens=4096,
             max_iter=6,
@@ -188,11 +210,29 @@ class DatabaseAgentFramework:
 
     def _build_orchestrator(self, api_key: str, on_event=None) -> OrchestratorAgent:
         pool = AgentPool()
-        pool.register("database_agent", self._build_database_worker(api_key, on_event))
-        pool.register("text_search_agent", self._build_text_worker(api_key, on_event))
-        pool.register("visual_search_agent", self._build_visual_worker(api_key, on_event))
+        pool.register(
+            "database_agent",
+            self._build_database_worker(api_key, on_event),
+            escalated_factory=lambda: self._build_database_worker(
+                api_key, on_event, model=_ESCALATION_MODEL
+            ),
+        )
+        pool.register(
+            "text_search_agent",
+            self._build_text_worker(api_key, on_event),
+            escalated_factory=lambda: self._build_text_worker(
+                api_key, on_event, model=_ESCALATION_MODEL
+            ),
+        )
+        pool.register(
+            "visual_search_agent",
+            self._build_visual_worker(api_key, on_event),
+            escalated_factory=lambda: self._build_visual_worker(
+                api_key, on_event, model=_ESCALATION_MODEL
+            ),
+        )
 
-        return OrchestratorAgent(
+        orchestrator = OrchestratorAgent(
             pool=pool,
             system=ORCHESTRATOR_SYSTEM_PROMPT,
             api_key=api_key,
@@ -200,6 +240,55 @@ class DatabaseAgentFramework:
             max_tokens=8192,
             max_iter=20,
         )
+
+        # The orchestrator (not a worker) renders charts: it holds the
+        # synthesized data after delegation and Sonnet emits structured
+        # specs more reliably than Haiku.
+        orchestrator.add_tool(
+            name="create_chart",
+            description=create_chart.__doc__ or "Render a chart for the user",
+            handler=create_chart,
+            params={
+                "chart_type": {
+                    "type": "string",
+                    "enum": ["bar", "line", "pie", "scatter"],
+                    "description": "Chart type",
+                },
+                "title": {"type": "string", "description": "Short chart title"},
+                "labels": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Category/x-axis labels, one per data point (omit for scatter)",
+                },
+                "datasets": {
+                    "type": "array",
+                    "description": (
+                        '1-4 series: [{"label": str, "data": [numbers]}]; '
+                        'for scatter, data is [{"x": number, "y": number}]'
+                    ),
+                    "items": {"type": "object"},
+                },
+            },
+            required=["chart_type", "title", "datasets"],
+        )
+
+        # Form suggestions (form-filling module integration) — description is
+        # built per request so newly added forms are visible immediately.
+        orchestrator.add_tool(
+            name="suggest_form",
+            description=build_suggest_form_description(),
+            handler=suggest_form,
+            params={
+                "form_id": {"type": "string", "description": "ID of the form to suggest"},
+                "prefill": {
+                    "type": "object",
+                    "description": "Field values you already know, e.g. {\"order_id\": \"1023\"}",
+                },
+            },
+            required=["form_id"],
+        )
+
+        return orchestrator
 
     # ------------------------------------------------------------------
     # Main chat interface
@@ -413,6 +502,30 @@ class DatabaseAgentFramework:
                     }
                     tool_calls.append(call)
                     yield {"type": "tool_call", **call}
+                    # Successfully validated charts also go to the frontend
+                    # as a dedicated event for rendering
+                    if event["tool"] == "create_chart" and str(event["result"]).startswith(
+                        CHART_SUCCESS_PREFIX
+                    ):
+                        yield {"type": "chart", "spec": event["args"]}
+                    # Validated form suggestions become an action event; the
+                    # form name/URL are resolved through the catalog (never
+                    # trusted from model output).
+                    elif event["tool"] == "suggest_form" and str(event["result"]).startswith(
+                        FORM_SUGGESTION_PREFIX
+                    ):
+                        from src.services.form_catalog import form_catalog
+
+                        form = form_catalog.get_form(event["args"].get("form_id", ""))
+                        if form is not None:
+                            yield {
+                                "type": "action",
+                                "action": "form_suggestion",
+                                "form_id": form["id"],
+                                "form_name": form["name"],
+                                "redirect_url": form["url"],
+                                "prefill": event["args"].get("prefill") or {},
+                            }
                 elif event_type == "max_iterations":
                     notice = (
                         "\n\nI couldn't fully complete this within my step limit — "

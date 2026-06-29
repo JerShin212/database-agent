@@ -4,6 +4,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from pgvector.sqlalchemy import Vector
 
 
+# Rows per multi-row INSERT — keeps statements bounded (inline vector
+# literals are ~1-2KB each) while cutting per-row round-trips.
+_INSERT_BATCH_SIZE = 100
+
+
+def _vector_literal(embedding: list[float]) -> str:
+    """Format an embedding as a PostgreSQL vector literal (floats only — safe to inline)."""
+    return "ARRAY[" + ",".join(str(x) for x in embedding) + "]::vector"
+
+
 class VectorDBService:
     def __init__(self, db: AsyncSession):
         self.db = db
@@ -12,35 +22,37 @@ class VectorDBService:
         self,
         chunks: list[dict],
     ) -> None:
-        """Insert document chunks with embeddings into the database."""
+        """Insert document chunks with embeddings using batched multi-row INSERTs."""
         if not chunks:
             return
 
-        # Insert chunks one by one using raw SQL with proper vector formatting
-        for chunk in chunks:
-            # Format embedding as PostgreSQL array literal
-            embedding = chunk["embedding"]
-            embedding_literal = "ARRAY[" + ",".join(str(x) for x in embedding) + "]::vector"
+        for batch_start in range(0, len(chunks), _INSERT_BATCH_SIZE):
+            batch = chunks[batch_start : batch_start + _INSERT_BATCH_SIZE]
+            values_sql = []
+            params: dict = {}
+            for i, chunk in enumerate(batch):
+                values_sql.append(
+                    f"(:id_{i}, :document_id_{i}, :collection_id_{i}, :chunk_index_{i}, "
+                    f":content_{i}, :start_char_{i}, :end_char_{i}, {_vector_literal(chunk['embedding'])})"
+                )
+                params.update(
+                    {
+                        f"id_{i}": str(chunk["id"]),
+                        f"document_id_{i}": str(chunk["document_id"]),
+                        f"collection_id_{i}": str(chunk["collection_id"]),
+                        f"chunk_index_{i}": chunk["chunk_index"],
+                        f"content_{i}": chunk["content"],
+                        f"start_char_{i}": chunk.get("start_char"),
+                        f"end_char_{i}": chunk.get("end_char"),
+                    }
+                )
 
-            # Use string formatting for the vector (safe since it's just floats)
-            # But use parameters for user-provided content
-            stmt = text(f"""
-                INSERT INTO document_chunks
-                (id, document_id, collection_id, chunk_index, content, start_char, end_char, embedding)
-                VALUES (:id, :document_id, :collection_id, :chunk_index, :content, :start_char, :end_char, {embedding_literal})
-            """)
-            await self.db.execute(
-                stmt,
-                {
-                    "id": str(chunk["id"]),
-                    "document_id": str(chunk["document_id"]),
-                    "collection_id": str(chunk["collection_id"]),
-                    "chunk_index": chunk["chunk_index"],
-                    "content": chunk["content"],
-                    "start_char": chunk.get("start_char"),
-                    "end_char": chunk.get("end_char"),
-                },
+            stmt = text(
+                "INSERT INTO document_chunks "
+                "(id, document_id, collection_id, chunk_index, content, start_char, end_char, embedding) "
+                "VALUES " + ", ".join(values_sql)
             )
+            await self.db.execute(stmt, params)
         await self.db.commit()
 
     async def search_similar(
@@ -138,6 +150,8 @@ class VectorDBService:
             collection_filter = ""
             params = {"limit": limit}
 
+        from src.config import settings
+
         # PostgreSQL FTS with BM25-like scoring using custom function
         # websearch_to_tsquery converts natural language to tsquery
         # bm25_rank function provides BM25-like scoring with length normalization
@@ -153,7 +167,7 @@ class VectorDBService:
                     dc.search_vector,
                     websearch_to_tsquery('english', :query),
                     dc.content_length,
-                    500.0,  -- avg_length parameter
+                    {float(settings.chunk_size)},  -- avg_length parameter
                     1.2,    -- k1 parameter (term saturation)
                     0.75    -- b parameter (length normalization)
                 ) as score
@@ -237,32 +251,37 @@ class VectorDBService:
         return combined_results[:limit]
 
     async def insert_pages(self, pages: list[dict]) -> None:
-        """Insert document pages with ColQwen2 visual embeddings."""
+        """Insert document pages with ColQwen2 visual embeddings (batched)."""
         if not pages:
             return
 
-        for page in pages:
-            embedding = page["visual_embedding"]
-            embedding_literal = "ARRAY[" + ",".join(str(x) for x in embedding) + "]::vector"
+        for batch_start in range(0, len(pages), _INSERT_BATCH_SIZE):
+            batch = pages[batch_start : batch_start + _INSERT_BATCH_SIZE]
+            values_sql = []
+            params: dict = {}
+            for i, page in enumerate(batch):
+                values_sql.append(
+                    f"(:id_{i}, :document_id_{i}, :collection_id_{i}, :page_number_{i}, "
+                    f"{_vector_literal(page['visual_embedding'])}, :multi_embedding_{i}, :n_vectors_{i})"
+                )
+                params.update(
+                    {
+                        f"id_{i}": str(page["id"]),
+                        f"document_id_{i}": str(page["document_id"]),
+                        f"collection_id_{i}": str(page["collection_id"]),
+                        f"page_number_{i}": page["page_number"],
+                        f"multi_embedding_{i}": page.get("multi_embedding"),
+                        f"n_vectors_{i}": page.get("n_vectors"),
+                    }
+                )
 
-            stmt = text(f"""
-                INSERT INTO document_pages
-                (id, document_id, collection_id, page_number, visual_embedding,
-                 multi_embedding, n_vectors)
-                VALUES (:id, :document_id, :collection_id, :page_number, {embedding_literal},
-                        :multi_embedding, :n_vectors)
-            """)
-            await self.db.execute(
-                stmt,
-                {
-                    "id": str(page["id"]),
-                    "document_id": str(page["document_id"]),
-                    "collection_id": str(page["collection_id"]),
-                    "page_number": page["page_number"],
-                    "multi_embedding": page.get("multi_embedding"),
-                    "n_vectors": page.get("n_vectors"),
-                },
+            stmt = text(
+                "INSERT INTO document_pages "
+                "(id, document_id, collection_id, page_number, visual_embedding, "
+                "multi_embedding, n_vectors) "
+                "VALUES " + ", ".join(values_sql)
             )
+            await self.db.execute(stmt, params)
         await self.db.commit()
 
     async def search_visual_similar(

@@ -11,8 +11,22 @@ export interface Message {
   role: 'user' | 'assistant'
   content: string
   tool_calls?: ToolCall[]
+  charts?: ChartSpec[]
+  formSuggestions?: FormSuggestion[]
   created_at: string
   imageUrl?: string // local preview URL for an attached image (not persisted)
+}
+
+export interface ChartDataset {
+  label: string
+  data: number[] | { x: number; y: number }[]
+}
+
+export interface ChartSpec {
+  chart_type: 'bar' | 'line' | 'pie' | 'scatter'
+  title: string
+  labels?: string[]
+  datasets: ChartDataset[]
 }
 
 export interface ImageAttachment {
@@ -27,8 +41,15 @@ export interface ToolCall {
   agent?: string // which worker agent made the call (e.g. database_agent)
 }
 
+export interface FormSuggestion {
+  form_id: string
+  form_name: string
+  redirect_url: string
+  prefill: Record<string, string>
+}
+
 export interface ChatStreamEvent {
-  type: 'metadata' | 'content' | 'tool_call' | 'error' | 'done'
+  type: 'metadata' | 'content' | 'tool_call' | 'chart' | 'action' | 'error' | 'done'
   conversation_id?: string
   content?: string
   tool?: string
@@ -36,6 +57,12 @@ export interface ChatStreamEvent {
   result?: string
   agent?: string
   error?: string
+  spec?: ChartSpec
+  action?: string
+  form_id?: string
+  form_name?: string
+  redirect_url?: string
+  prefill?: Record<string, string>
 }
 
 export interface Collection {

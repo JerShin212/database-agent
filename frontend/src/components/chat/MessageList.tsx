@@ -4,6 +4,8 @@ import remarkGfm from 'remark-gfm'
 import { User, Bot, Wrench, Loader2 } from 'lucide-react'
 import type { Message, ToolCall } from '../../types'
 import { useChatStore } from '../../stores/chatStore'
+import ChartBlock, { chartsFromToolCalls } from './ChartBlock'
+import FormSuggestionCard, { formSuggestionsFromToolCalls } from './FormSuggestionCard'
 import clsx from 'clsx'
 
 interface MessageListProps {
@@ -111,9 +113,23 @@ function MessageBubble({ message }: { message: Message }) {
               <p className="whitespace-pre-wrap">{message.content}</p>
             </div>
           ) : (
-            <ReactMarkdown className="prose prose-sm max-w-none" remarkPlugins={[remarkGfm]}>
-              {message.content}
-            </ReactMarkdown>
+            <>
+              <ReactMarkdown className="prose prose-sm max-w-none" remarkPlugins={[remarkGfm]}>
+                {message.content}
+              </ReactMarkdown>
+              {(message.charts && message.charts.length > 0
+                ? message.charts
+                : chartsFromToolCalls(message.tool_calls)
+              ).map((spec, i) => (
+                <ChartBlock key={i} spec={spec} />
+              ))}
+              {(message.formSuggestions && message.formSuggestions.length > 0
+                ? message.formSuggestions
+                : formSuggestionsFromToolCalls(message.tool_calls)
+              ).map((suggestion, i) => (
+                <FormSuggestionCard key={i} suggestion={suggestion} />
+              ))}
+            </>
           )}
         </div>
       </div>

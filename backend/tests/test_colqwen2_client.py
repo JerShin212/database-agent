@@ -120,6 +120,44 @@ def test_retry_recovers_from_transient_http_error(client):
     assert len(FakeHttpClient.calls) == 2
 
 
+def test_embed_text_cache_skips_second_http_call(client):
+    multi = [[1.0] * 128]
+    FakeHttpClient.responses = [FakeResponse({"embeddings": multi})]
+
+    first = client.embed_text_multivector_sync("same query")
+    second = client.embed_text_multivector_sync("same query")
+
+    assert first == second == multi
+    assert len(FakeHttpClient.calls) == 1
+
+
+def test_embed_text_cache_distinct_queries_both_fetch(client):
+    multi_a = [[1.0] * 128]
+    multi_b = [[2.0] * 128]
+    FakeHttpClient.responses = [
+        FakeResponse({"embeddings": multi_a}),
+        FakeResponse({"embeddings": multi_b}),
+    ]
+
+    assert client.embed_text_multivector_sync("query a") == multi_a
+    assert client.embed_text_multivector_sync("query b") == multi_b
+    assert len(FakeHttpClient.calls) == 2
+
+
+def test_embed_text_cache_evicts_oldest(client):
+    client._TEXT_CACHE_MAX = 2
+    FakeHttpClient.responses = [
+        FakeResponse({"embeddings": [[float(i)] * 128]}) for i in range(4)
+    ]
+
+    client.embed_text_multivector_sync("q0")
+    client.embed_text_multivector_sync("q1")
+    client.embed_text_multivector_sync("q2")  # evicts q0
+    client.embed_text_multivector_sync("q0")  # must re-fetch
+
+    assert len(FakeHttpClient.calls) == 4
+
+
 def test_unconfigured_endpoints_return_empty():
     c = ColQwen2Client()
     c.text_endpoint = ""

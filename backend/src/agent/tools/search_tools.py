@@ -61,10 +61,12 @@ def search_collections(query: str, collection_ids: str = None, limit: int = 5) -
                 coll_filter_semantic = ""
 
             # 1. BM25-like Keyword search (PostgreSQL FTS)
+            from src.config import settings
+
             keyword_sql = text(f"""
                 SELECT dc.id, dc.content, dc.chunk_index, d.filename,
                        bm25_rank(dc.search_vector, websearch_to_tsquery('english', :query),
-                                 dc.content_length, 500.0, 1.2, 0.75) as score
+                                 dc.content_length, {float(settings.chunk_size)}, 1.2, 0.75) as score
                 FROM document_chunks dc
                 JOIN documents d ON dc.document_id = d.id
                 WHERE dc.search_vector @@ websearch_to_tsquery('english', :query)
@@ -118,7 +120,9 @@ def search_collections(query: str, collection_ids: str = None, limit: int = 5) -
             for i, result in enumerate(final_results, 1):
                 lines.append(f"### Result {i} (RRF Score: {result['score']:.3f})")
                 lines.append(f"**Source:** {result['filename']}")
-                lines.append(f"**Content:** {result['content'][:500]}...")
+                content = result["content"]
+                truncated = content[:1200] + "..." if len(content) > 1200 else content
+                lines.append(f"**Content:** {truncated}")
                 lines.append("")
 
             return "\n".join(lines)

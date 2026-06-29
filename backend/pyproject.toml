@@ -67,3 +67,7 @@ ignore = ["E501"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+    "eval: LLM evaluation tests (require RUN_EVALS=1 and an Anthropic API key)",
+    "eval_retrieval: retrieval evals (additionally require Postgres :5433 and Modal endpoints)",
+]

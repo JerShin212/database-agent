@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Optional
 from uuid import UUID, uuid4
 from sqlalchemy import Column, String, Integer, LargeBinary, Text, DateTime, ForeignKey
-from sqlalchemy.dialects.postgresql import UUID as PGUUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID as PGUUID
 from pgvector.sqlalchemy import Vector
 from src.db.database import Base
 
@@ -34,6 +34,10 @@ class Document(Base):
     error_message: Optional[str] = Column(Text, nullable=True)
     extracted_text: Optional[str] = Column(Text, nullable=True)
     summary: Optional[str] = Column(Text, nullable=True)
+    # Ingest-by-reference (knowledge base integration) — see migrations/add_external_documents.sql
+    external_id: Optional[str] = Column(String(255), nullable=True, unique=True)
+    source_url: Optional[str] = Column(Text, nullable=True)
+    source_metadata: Optional[dict] = Column(JSONB, nullable=True)
     created_at: datetime = Column(DateTime, default=datetime.utcnow)
     updated_at: datetime = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

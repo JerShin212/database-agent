@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 
 from src.config import settings
 from src.db.database import init_db
-from src.api.v1 import chat, collections, connectors, databases, schema
+from src.api.v1 import chat, collections, connectors, databases, forms, integrations, schema
 
 
 @asynccontextmanager
@@ -40,6 +40,8 @@ app.include_router(collections.router, prefix="/api/collections", tags=["collect
 app.include_router(connectors.router, prefix="/api", tags=["connectors"])
 app.include_router(databases.router, prefix="/api/databases", tags=["databases"])
 app.include_router(schema.router, prefix="/api", tags=["schema"])
+app.include_router(integrations.router, prefix="/api/integrations", tags=["integrations"])
+app.include_router(forms.router, prefix="/api", tags=["forms"])
 
 
 @app.get("/health")

@@ -8,7 +8,8 @@ and HandoffChain are omitted as they are not used in this project.
 
 from __future__ import annotations
 
-from typing import Any, Generator
+import threading
+from typing import Any, Callable, Generator
 
 from src.agent.agent_runtime import AgentRuntime
 
@@ -22,9 +23,19 @@ class AgentPool:
 
     def __init__(self) -> None:
         self._agents: dict[str, AgentRuntime] = {}
+        # Factories that rebuild a worker on a stronger model for escalation
+        self._escalated_factories: dict[str, Callable[[], AgentRuntime]] = {}
+        self._escalated_agents: dict[str, AgentRuntime] = {}
 
-    def register(self, name: str, agent: AgentRuntime) -> None:
+    def register(
+        self,
+        name: str,
+        agent: AgentRuntime,
+        escalated_factory: Callable[[], AgentRuntime] | None = None,
+    ) -> None:
         self._agents[name] = agent
+        if escalated_factory is not None:
+            self._escalated_factories[name] = escalated_factory
 
     def get(self, name: str) -> AgentRuntime | None:
         return self._agents.get(name)
@@ -41,6 +52,26 @@ class AgentPool:
         except Exception as exc:
             # A crashed worker must not kill the orchestrator's turn
             return f"[Worker {name} failed: {exc}]"
+
+    def has_escalation(self, name: str) -> bool:
+        return name in self._escalated_factories
+
+    def run_escalated(self, name: str, prompt: str) -> tuple[str, str] | None:
+        """Run the task on the worker's escalated (stronger-model) variant.
+
+        Returns (result, model_name), or None when no escalation is registered.
+        """
+        factory = self._escalated_factories.get(name)
+        if factory is None:
+            return None
+        agent = self._escalated_agents.get(name)
+        if agent is None:
+            agent = factory()
+            self._escalated_agents[name] = agent
+        try:
+            return agent.run(prompt), agent.model
+        except Exception as exc:
+            return f"[Worker {name} (escalated) failed: {exc}]", agent.model
 
     def describe(self) -> str:
         lines = []
@@ -63,6 +94,16 @@ _FALLBACK_AGENT = {
 
 # Worker responses starting with this token signal "nothing found"
 NO_RESULTS_TOKEN = "NO_RESULTS"
+
+# Sentinel returned by AgentRuntime when the loop exhausts max_iter
+MAX_ITER_SENTINEL = "[Max iterations reached without a final response]"
+
+
+def _is_capability_failure(result: str) -> bool:
+    """True when the worker crashed or ran out of iterations — failures a
+    stronger model might fix, as opposed to data simply not existing."""
+    stripped = result.lstrip()
+    return stripped.startswith("[Worker ") or stripped.startswith(MAX_ITER_SENTINEL)
 
 
 class OrchestratorAgent:
@@ -89,6 +130,10 @@ class OrchestratorAgent:
     ) -> None:
         self.pool = pool
         self._fallbacks_used: set[str] = set()
+        self._escalations_used: set[str] = set()
+        # Parallel delegate calls run in separate threads — guard the
+        # one-shot bookkeeping sets above.
+        self._state_lock = threading.Lock()
 
         worker_list = pool.describe()
         default_system = (
@@ -132,21 +177,54 @@ class OrchestratorAgent:
     def _delegate_handler(self, agent: str, task: str) -> str:
         result = self.pool.run(agent, task)
 
+        # 1. Cross-agent fallback on NO_RESULTS — cheap, catches routing
+        #    mistakes (the data lives in the other source).
         alternate = _FALLBACK_AGENT.get(agent)
-        if (
-            alternate
-            and result.lstrip().startswith(NO_RESULTS_TOKEN)
-            and agent not in self._fallbacks_used
-        ):
-            self._fallbacks_used.add(agent)
-            alternate_result = self.pool.run(alternate, task)
-            return (
-                f"[{agent}] {result}\n\n"
-                f"[Automatic fallback to {alternate}]\n"
-                f"[{alternate}] {alternate_result}"
-            )
+        alternate_result = None
+        if alternate and result.lstrip().startswith(NO_RESULTS_TOKEN):
+            with self._state_lock:
+                use_fallback = agent not in self._fallbacks_used
+                if use_fallback:
+                    self._fallbacks_used.add(agent)
+            if use_fallback:
+                alternate_result = self.pool.run(alternate, task)
 
-        return result
+        # 2. Model escalation — retry the same worker on a stronger model,
+        #    but only for capability failures (crash / max-iterations), or
+        #    when both the worker AND its fallback came up empty-or-broken.
+        escalated = None
+        if self._should_escalate(agent, result, alternate_result):
+            with self._state_lock:
+                use_escalation = agent not in self._escalations_used
+                if use_escalation:
+                    self._escalations_used.add(agent)
+            if use_escalation:
+                escalated = self.pool.run_escalated(agent, task)
+
+        if alternate_result is None and escalated is None:
+            return result
+
+        parts = [f"[{agent}] {result}"]
+        if alternate_result is not None:
+            parts.append(
+                f"[Automatic fallback to {alternate}]\n[{alternate}] {alternate_result}"
+            )
+        if escalated is not None:
+            escalated_result, escalated_model = escalated
+            parts.append(f"[Escalated {agent} to {escalated_model}]\n{escalated_result}")
+        return "\n\n".join(parts)
+
+    def _should_escalate(self, agent: str, result: str, alternate_result: str | None) -> bool:
+        if not self.pool.has_escalation(agent):
+            return False
+        if _is_capability_failure(result):
+            return True
+        # Both the worker and its cross-agent fallback found nothing or broke
+        if result.lstrip().startswith(NO_RESULTS_TOKEN) and alternate_result is not None:
+            return _is_capability_failure(alternate_result) or alternate_result.lstrip().startswith(
+                NO_RESULTS_TOKEN
+            )
+        return False
 
     def run(self, user_input: str | list[dict[str, Any]]) -> str:
         return self.agent.run(user_input)

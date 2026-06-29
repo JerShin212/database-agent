@@ -139,6 +139,24 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 },
               ],
             }))
+          } else if (event.type === 'chart' && event.spec) {
+            updateAssistant((m) => ({
+              ...m,
+              charts: [...(m.charts || []), event.spec!],
+            }))
+          } else if (event.type === 'action' && event.action === 'form_suggestion') {
+            updateAssistant((m) => ({
+              ...m,
+              formSuggestions: [
+                ...(m.formSuggestions || []),
+                {
+                  form_id: event.form_id || '',
+                  form_name: event.form_name || 'Form',
+                  redirect_url: event.redirect_url || '#',
+                  prefill: event.prefill || {},
+                },
+              ],
+            }))
           } else if (event.type === 'error' && event.error) {
             streamError = event.error
           }
