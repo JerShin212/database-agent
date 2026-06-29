@@ -4,6 +4,8 @@ Only the orchestrator (Sonnet) hits the API — workers are recording stubs that
 return canned, plausible answers. This isolates routing quality from tool quality.
 """
 
+import asyncio
+import os
 import sys
 from pathlib import Path
 
@@ -12,8 +14,9 @@ import pytest
 backend_path = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(backend_path))
 
-from src.agent.orchestrator import AgentPool, OrchestratorAgent
-from src.agent.prompts import ORCHESTRATOR_SYSTEM_PROMPT
+import src.agent.sdk.orchestrator as orch
+from src.agent.sdk.orchestrator import run_orchestrator_events
+from src.agent.sdk.descriptor import Descriptor
 
 from .conftest import get_api_key
 
@@ -53,51 +56,33 @@ _CANNED_ANSWERS = {
 }
 
 
-class RecordingStubWorker:
-    def __init__(self, name: str, description: str):
-        self.name = name
-        self.system = description
-        self.calls: list[str] = []
+def _run_routing(question, monkeypatch):
+    """Drive the real orchestrator (Sonnet) but replace run_worker with a recorder
+    so only routing is measured. Returns the set of workers the orchestrator
+    delegated to."""
+    called: set[str] = set()
 
-    def run(self, prompt: str) -> str:
-        self.calls.append(prompt)
-        return _CANNED_ANSWERS[self.name]
+    async def recording_run_worker(name, task, descriptor, emit, *, model=None):
+        called.add(name)
+        return _CANNED_ANSWERS[name]
 
+    monkeypatch.setattr(orch, "run_worker", recording_run_worker)
 
-def _build_orchestrator():
-    workers = {
-        "database_agent": RecordingStubWorker(
-            "database_agent", "SQL queries, schema exploration, structured data analysis"
-        ),
-        "text_search_agent": RecordingStubWorker(
-            "text_search_agent", "full-text and semantic search over uploaded documents"
-        ),
-        "visual_search_agent": RecordingStubWorker(
-            "visual_search_agent", "visual search over PDF pages (diagrams, figures, charts)"
-        ),
-    }
-    pool = AgentPool()
-    for name, worker in workers.items():
-        pool.register(name, worker)
-    orchestrator = OrchestratorAgent(
-        pool=pool,
-        system=ORCHESTRATOR_SYSTEM_PROMPT,
-        api_key=get_api_key(),
-        model="claude-sonnet-4-6",
-        max_tokens=4096,
-        max_iter=8,
-    )
-    return orchestrator, workers
+    async def _drain():
+        async for _ in run_orchestrator_events(Descriptor(), question):
+            pass
+
+    asyncio.run(_drain())
+    return called
 
 
-def test_routing_accuracy():
+def test_routing_accuracy(monkeypatch):
+    os.environ["ANTHROPIC_API_KEY"] = get_api_key()
     passed = 0
     failures = []
 
     for question, expected, allow_extra in ROUTING_CASES:
-        orchestrator, workers = _build_orchestrator()
-        orchestrator.run(question)
-        called = {name for name, w in workers.items() if w.calls}
+        called = _run_routing(question, monkeypatch)
 
         ok = expected.issubset(called) and (allow_extra or called == expected)
         if ok:

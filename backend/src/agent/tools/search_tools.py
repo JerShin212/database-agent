@@ -1,14 +1,13 @@
 import logging
 from uuid import UUID
 
-from src.agent.tools.context import get_tool_context
 from src.db.database import SyncSessionLocal
 from src.models.collection import Collection
 
 logger = logging.getLogger(__name__)
 
 
-def search_collections(query: str, collection_ids: str = None, limit: int = 5) -> str:
+def search_collections(query: str, context, collection_ids: str = None, limit: int = 5) -> str:
     """
     Search document collections using hybrid search (keyword + semantic with RRF).
 
@@ -30,7 +29,6 @@ def search_collections(query: str, collection_ids: str = None, limit: int = 5) -
     from src.services.colqwen2_client import colqwen2_client
     from src.services.rrf import reciprocal_rank_fusion
 
-    context = get_tool_context()
 
     # Parse collection IDs
     coll_ids = None
@@ -132,7 +130,7 @@ def search_collections(query: str, collection_ids: str = None, limit: int = 5) -
         return f"Error searching collections: {str(e)}"
 
 
-def search_visual_documents(query: str, collection_ids: str = None, limit: int = 5) -> str:
+def search_visual_documents(query: str, context, collection_ids: str = None, limit: int = 5) -> str:
     """
     Search document pages visually using ColQwen2 embeddings.
 
@@ -157,7 +155,7 @@ def search_visual_documents(query: str, collection_ids: str = None, limit: int =
             "Set COLQWEN2_TEXT_ENDPOINT in environment to enable this capability."
         )
 
-    coll_ids, err = _parse_collection_ids(collection_ids)
+    coll_ids, err = _parse_collection_ids(context, collection_ids)
     if err:
         return err
 
@@ -186,9 +184,8 @@ def search_visual_documents(query: str, collection_ids: str = None, limit: int =
         return f"Error searching visual documents: {str(e)}"
 
 
-def _parse_collection_ids(collection_ids: str = None) -> tuple[list[UUID] | None, str | None]:
+def _parse_collection_ids(context, collection_ids: str = None) -> tuple[list[UUID] | None, str | None]:
     """Resolve collection IDs from the argument or the tool context. Returns (ids, error)."""
-    context = get_tool_context()
     if collection_ids:
         try:
             return [UUID(cid.strip()) for cid in collection_ids.split(",")], None
@@ -269,7 +266,7 @@ def _two_stage_page_search(
     ]
 
 
-def search_by_image(text_query: str = None, limit: int = 5) -> str:
+def search_by_image(context, text_query: str = None, limit: int = 5) -> str:
     """
     Search document pages using the image the user attached to their message.
 
@@ -288,7 +285,6 @@ def search_by_image(text_query: str = None, limit: int = 5) -> str:
     from src.services.colqwen2_client import colqwen2_client
     from src.services.rrf import reciprocal_rank_fusion
 
-    context = get_tool_context()
     if not context or not context.image_bytes:
         return (
             "NO_RESULTS: No image is attached to the current message. "
@@ -301,7 +297,7 @@ def search_by_image(text_query: str = None, limit: int = 5) -> str:
             "Set COLQWEN2_IMAGE_ENDPOINT in environment to enable this capability."
         )
 
-    coll_ids, err = _parse_collection_ids()
+    coll_ids, err = _parse_collection_ids(context)
     if err:
         return err
 

@@ -6,7 +6,6 @@ sections across documents instead of reasoning from 1-2 retrieved chunks.
 
 import logging
 
-from src.agent.tools.context import get_tool_context
 
 logger = logging.getLogger(__name__)
 
@@ -15,7 +14,7 @@ _MAX_LENGTH = 20_000
 _DEFAULT_LENGTH = 15_000
 
 
-def read_document(filename: str, start_char: int = 0, length: int = _DEFAULT_LENGTH) -> str:
+def read_document(filename: str, context, start_char: int = 0, length: int = _DEFAULT_LENGTH) -> str:
     """
     Read the extracted text of a document by filename.
 
@@ -37,7 +36,6 @@ def read_document(filename: str, start_char: int = 0, length: int = _DEFAULT_LEN
     from src.db.database import SyncSessionLocal
     from src.models.collection import Document
 
-    context = get_tool_context()
 
     try:
         start_char = max(0, int(start_char))

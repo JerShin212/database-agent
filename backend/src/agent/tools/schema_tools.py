@@ -20,7 +20,6 @@ from uuid import UUID
 import numpy as np
 from sqlalchemy import text
 
-from src.agent.tools.context import get_tool_context
 from src.db.database import SyncSessionLocal
 from src.services.rrf import reciprocal_rank_fusion
 from src.services.schema_serializer import extract_value_tokens
@@ -182,7 +181,7 @@ def _fetch_table_context(db, connector_uuid: UUID, table_names: list[str]) -> tu
     return {row[0]: row[1] for row in table_defs}, relationships
 
 
-def search_schema_catalog(query: str, connector_id: str = None, limit: int = 5) -> str:
+def search_schema_catalog(query: str, context, connector_id: str = None, limit: int = 5) -> str:
     """
     Search the semantic schema catalog using hybrid retrieval
     (keyword + semantic + data-value match, fused with RRF, MaxSim reranked).
@@ -203,7 +202,6 @@ def search_schema_catalog(query: str, connector_id: str = None, limit: int = 5) 
     Returns:
         Schema definitions grouped by table with join hints
     """
-    context = get_tool_context()
     if not context:
         return "Error: No context available"
 

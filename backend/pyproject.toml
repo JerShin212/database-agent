@@ -29,6 +29,7 @@ dependencies = [
 
     # AI/ML
     "anthropic>=0.39.0",
+    "claude-agent-sdk>=0.2.110",  # in-process MCP tool servers + query() agent loop (needs the `claude` CLI on PATH)
     "numpy>=1.26.0",
 
     # Utilities

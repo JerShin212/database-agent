@@ -15,7 +15,6 @@ from src.agent.tools.schema_tools import (
 )
 from src.agent.tools.chart_tools import create_chart, CHART_SUCCESS_PREFIX
 from src.agent.tools.document_tools import read_document
-from src.agent.tools.context import ToolContext, set_tool_context, get_tool_context
 
 __all__ = [
     "create_chart",
@@ -30,7 +29,4 @@ __all__ = [
     "search_visual_documents",
     "search_by_image",
     "search_schema_catalog",
-    "ToolContext",
-    "set_tool_context",
-    "get_tool_context",
 ]

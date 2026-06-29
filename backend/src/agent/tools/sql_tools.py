@@ -7,7 +7,6 @@ When semantic definitions are available from the schema catalog, they're include
 
 from uuid import UUID
 
-from src.agent.tools.context import get_tool_context
 from src.services.sqlite_service import sqlite_service
 
 # Markers of SQL errors the agent can fix itself given the right context
@@ -84,7 +83,7 @@ def _enrich_sqlite_error(error: str, context) -> str:
     return "\n".join(parts)
 
 
-def execute_sql_query(sql: str, database_id: str = None, connector_id: str = None) -> str:
+def execute_sql_query(sql: str, context, database_id: str = None, connector_id: str = None) -> str:
     """
     Execute a SQL query against a database (local SQLite or external connector).
     Only SELECT statements are allowed for safety.
@@ -97,7 +96,6 @@ def execute_sql_query(sql: str, database_id: str = None, connector_id: str = Non
     Returns:
         Query results as formatted text
     """
-    context = get_tool_context()
     if not context:
         return "Error: No context available"
 
@@ -191,7 +189,7 @@ def _execute_sql_connector(sql: str, connector_id: UUID, context) -> str:
         return message
 
 
-def get_database_schema(database_id: str = None, connector_id: str = None) -> str:
+def get_database_schema(context, database_id: str = None, connector_id: str = None) -> str:
     """
     Get the complete schema of the database including all tables,
     columns, types, and relationships.
@@ -205,7 +203,6 @@ def get_database_schema(database_id: str = None, connector_id: str = None) -> st
     Returns:
         Formatted schema information
     """
-    context = get_tool_context()
     if not context:
         return "Error: No context available"
 
@@ -315,7 +312,7 @@ def _get_schema_connector(connector_id: UUID, context) -> str:
         return f"Error fetching schema: {str(e)}"
 
 
-def list_tables(database_id: str = None, connector_id: str = None) -> str:
+def list_tables(context, database_id: str = None, connector_id: str = None) -> str:
     """
     List all tables in the database with basic info.
 
@@ -326,7 +323,6 @@ def list_tables(database_id: str = None, connector_id: str = None) -> str:
     Returns:
         Table names with row counts and column counts
     """
-    context = get_tool_context()
     if not context:
         return "Error: No context available"
 
@@ -403,7 +399,7 @@ def _list_tables_connector(connector_id: UUID, context) -> str:
         return f"Error listing tables: {str(e)}"
 
 
-def get_table_info(table_name: str, database_id: str = None, connector_id: str = None) -> str:
+def get_table_info(table_name: str, context, database_id: str = None, connector_id: str = None) -> str:
     """
     Get detailed information about a specific table.
 
@@ -415,7 +411,6 @@ def get_table_info(table_name: str, database_id: str = None, connector_id: str =
     Returns:
         Column definitions, keys, and sample data
     """
-    context = get_tool_context()
     if not context:
         return "Error: No context available"
 

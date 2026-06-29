@@ -17,8 +17,11 @@ import pytest
 backend_path = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(backend_path))
 
-from src.agent.framework import DatabaseAgentFramework
-from src.agent.tools.context import ToolContext, set_tool_context
+import asyncio
+import os
+
+from src.agent.sdk.descriptor import Descriptor
+from src.agent.sdk.worker import run_worker
 
 from .conftest import get_api_key
 
@@ -83,12 +86,13 @@ def fixture_db(tmp_path_factory):
     return db_path
 
 
-def _build_database_agent():
-    framework = DatabaseAgentFramework()
-    worker = framework._build_database_worker(get_api_key())
-    # Needs the Postgres semantic catalog — not available in this eval
-    worker.registry._tools.pop("search_schema_catalog", None)
-    return worker
+def _answer(question, fixture_db):
+    # database_path set, no connector_id -> SQLite path; search_schema_catalog
+    # returns a harmless "no catalog" message (no Postgres in this eval) and the
+    # agent falls back to the raw schema tools, the documented behavior.
+    os.environ["ANTHROPIC_API_KEY"] = get_api_key()
+    descriptor = Descriptor(database_path=fixture_db, database_name="shop")
+    return asyncio.run(run_worker("database_agent", question, descriptor, lambda e: None))
 
 
 def test_sql_correctness(fixture_db):
@@ -96,16 +100,7 @@ def test_sql_correctness(fixture_db):
     failures = []
 
     for question, expected_any in SQL_CASES:
-        set_tool_context(
-            ToolContext(
-                db=None,
-                database_id=None,
-                database_path=fixture_db,
-                database_name="shop",
-            )
-        )
-        agent = _build_database_agent()
-        answer = agent.run(question)
+        answer = _answer(question, fixture_db)
 
         ok = any(expected in answer for expected in expected_any)
         if ok:
