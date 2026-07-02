@@ -26,6 +26,7 @@ from claude_agent_sdk import (
     ToolResultBlock,
 )
 
+from src.config import settings
 from src.agent.prompts import (
     DATABASE_AGENT_PROMPT,
     TEXT_SEARCH_AGENT_PROMPT,
@@ -40,7 +41,7 @@ from src.agent.sdk.servers import (
 
 logger = logging.getLogger(__name__)
 
-WORKER_MODEL = "claude-haiku-4-5-20251001"
+WORKER_MODEL = settings.worker_model
 MAX_ITER_SENTINEL = "[Max iterations reached without a final response]"
 
 # name -> (server factory, system prompt, max_turns)
@@ -110,6 +111,11 @@ async def run_worker(
                               "tool": info["tool"], "args": info["args"],
                               "result": text[:500], "is_error": bool(block.is_error)})
             elif isinstance(msg, ResultMessage):
+                logger.info(
+                    "[worker:%s] model=%s subtype=%s turns=%s duration_ms=%s cost_usd=%s",
+                    name, model or WORKER_MODEL, msg.subtype, msg.num_turns,
+                    msg.duration_ms, msg.total_cost_usd,
+                )
                 if msg.subtype == "success":
                     final = msg.result or ""
     except Exception as exc:

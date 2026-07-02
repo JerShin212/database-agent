@@ -1,3 +1,5 @@
+import os
+
 import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -11,6 +13,10 @@ from src.api.v1 import chat, collections, connectors, databases, forms, integrat
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
+    # The Claude Agent SDK's CLI subprocess authenticates from the process
+    # environment — set it once here, not per request.
+    if settings.anthropic_api_key:
+        os.environ["ANTHROPIC_API_KEY"] = settings.anthropic_api_key
     await init_db()
     print("Database initialized")
     yield

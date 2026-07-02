@@ -15,14 +15,12 @@ and the frontend require no modification.
 from __future__ import annotations
 
 import logging
-import os
 from typing import AsyncGenerator
 from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.config import settings
 from src.models.connector import Connector
 from src.models.conversation import Conversation, Message
 from src.models.database import SQLiteDatabase
@@ -31,6 +29,11 @@ from src.agent.sdk.descriptor import Descriptor
 from src.agent.sdk.orchestrator import run_orchestrator_events
 
 logger = logging.getLogger(__name__)
+
+# Caps for the legacy text-replay fallback (conversations without a stored SDK
+# session id, or whose session transcript is gone after a container restart).
+_HISTORY_MAX_MESSAGES = 20
+_HISTORY_MSG_CHAR_CAP = 4000
 
 
 async def _stream_input(content):
@@ -63,10 +66,6 @@ class DatabaseAgentFramework:
           {"type": "error",     "error": str}
           {"type": "done",      "conversation_id": str}
         """
-        # The SDK's CLI subprocess authenticates from the process environment.
-        if settings.anthropic_api_key:
-            os.environ["ANTHROPIC_API_KEY"] = settings.anthropic_api_key
-
         # --- 1. Pre-fetch database info (db path + semantic catalog connector) ---
         db_path = None
         db_name = None
@@ -158,57 +157,100 @@ class DatabaseAgentFramework:
         db.add(user_message)
         await db.commit()
 
-        # --- 5. Build the prompt (history injected as text) ---
-        if is_initial:
-            full_prompt = message
-        else:
-            history_text = "\n".join(
-                f"{msg.role.capitalize()}: {msg.content}" for msg in messages
-            )
-            full_prompt = f"[Previous conversation]\n{history_text}\n\n[User]: {message}"
+        # --- 5. Build the prompt ---
+        # With a stored SDK session id we resume the CLI session — the model
+        # keeps its full prior context (including tool results) with prompt
+        # caching, and we send only the new message. Conversations without a
+        # session id (or whose session transcript is gone, e.g. after a
+        # container restart) fall back to replaying recent history as text.
+        resume_id = None if is_initial else conversation.sdk_session_id
 
-        # An attached image is passed to the vision-capable orchestrator via the
-        # streaming-input form; the visual worker re-embeds image_bytes from the
-        # descriptor (it does not need the image in the prompt).
-        if image_bytes:
-            prompt_input = _stream_input([
-                {"type": "image", "source": {
-                    "type": "base64",
-                    "media_type": image_media_type or "image/png",
-                    "data": image_data,
-                }},
-                {"type": "text", "text": f"[The user attached the image above]\n\n{full_prompt}"},
-            ])
-        else:
-            prompt_input = full_prompt
+        def build_prompt_input(use_resume: bool):
+            if is_initial or use_resume:
+                text = message
+            else:
+                recent = messages[-_HISTORY_MAX_MESSAGES:]
+                history_text = "\n".join(
+                    f"{msg.role.capitalize()}: {msg.content[:_HISTORY_MSG_CHAR_CAP]}"
+                    for msg in recent
+                )
+                dropped = len(messages) - len(recent)
+                omitted = f", {dropped} older messages omitted" if dropped else ""
+                text = (f"[Previous conversation — last {len(recent)} messages{omitted}]\n"
+                        f"{history_text}\n\n[User]: {message}")
+
+            # An attached image is passed to the vision-capable orchestrator via
+            # the streaming-input form; the visual worker re-embeds image_bytes
+            # from the descriptor (it does not need the image in the prompt).
+            if image_bytes:
+                return _stream_input([
+                    {"type": "image", "source": {
+                        "type": "base64",
+                        "media_type": image_media_type or "image/png",
+                        "data": image_data,
+                    }},
+                    {"type": "text", "text": f"[The user attached the image above]\n\n{text}"},
+                ])
+            return text
 
         # --- 6. Drive the orchestrator query() and forward its event stream ---
+        # First attempt resumes the stored session; if that fails before any
+        # output was produced, retry once from scratch with text-replay history.
+        attempts = [True, False] if resume_id else [False]
         answer_parts: list[str] = []
         tool_calls: list[dict] = []
+        session_id: str | None = None
         try:
-            async for event in run_orchestrator_events(descriptor, prompt_input):
-                etype = event.get("type")
-                if etype == "content":
-                    answer_parts.append(event["content"])
-                    yield {"type": "content", "content": event["content"]}
-                elif etype == "tool_call":
-                    call = {
-                        "tool": event["tool"],
-                        "args": event.get("args", {}),
-                        "result": event.get("result", ""),
-                        "agent": event.get("agent"),
-                    }
-                    tool_calls.append(call)
-                    yield {"type": "tool_call", **call}
-                elif etype == "chart":
-                    yield {"type": "chart", "spec": event["spec"]}
-                elif etype == "action":
-                    yield {k: v for k, v in event.items()}
-                elif etype == "notice":
-                    answer_parts.append(event["text"])
-                    yield {"type": "content", "content": event["text"]}
-                elif etype == "error":
-                    yield {"type": "error", "error": event["error"]}
+            for attempt_idx, use_resume in enumerate(attempts):
+                produced_output = False
+                retry_without_resume = False
+                events = run_orchestrator_events(
+                    descriptor,
+                    build_prompt_input(use_resume),
+                    resume=resume_id if use_resume else None,
+                )
+                async for event in events:
+                    etype = event.get("type")
+                    if (etype == "error" and not produced_output
+                            and attempt_idx + 1 < len(attempts)):
+                        logger.warning(
+                            "[framework] resume of session %s failed (%s) — "
+                            "retrying with history replay", resume_id, event.get("error"),
+                        )
+                        retry_without_resume = True
+                        break
+                    if etype == "session":
+                        session_id = event.get("session_id")
+                    elif etype == "content":
+                        produced_output = True
+                        answer_parts.append(event["content"])
+                        yield {"type": "content", "content": event["content"]}
+                    elif etype == "tool_call":
+                        produced_output = True
+                        call = {
+                            "tool": event["tool"],
+                            "args": event.get("args", {}),
+                            "result": event.get("result", ""),
+                            "agent": event.get("agent"),
+                        }
+                        tool_calls.append(call)
+                        yield {"type": "tool_call", **call}
+                    elif etype == "chart":
+                        produced_output = True
+                        yield {"type": "chart", "spec": event["spec"]}
+                    elif etype == "action":
+                        produced_output = True
+                        yield {k: v for k, v in event.items()}
+                    elif etype == "notice":
+                        answer_parts.append(event["text"])
+                        yield {"type": "content", "content": event["text"]}
+                    elif etype == "error":
+                        yield {"type": "error", "error": event["error"]}
+                if not retry_without_resume:
+                    break
+                # Deterministically shut the abandoned event stream down
+                # (its finally block awaits the orchestrator task).
+                await events.aclose()
 
             answer = "".join(answer_parts)
 
@@ -219,11 +261,11 @@ class DatabaseAgentFramework:
                 tool_calls=tool_calls or None,
             )
             db.add(assistant_message)
-            await db.commit()
-
+            if session_id:
+                conversation.sdk_session_id = session_id
             if is_initial:
                 conversation.title = message[:50] + "..." if len(message) > 50 else message
-                await db.commit()
+            await db.commit()
 
         except Exception as e:
             logger.error("[framework] %s", e, exc_info=True)

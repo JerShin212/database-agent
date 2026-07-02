@@ -25,14 +25,15 @@ from typing import Any, AsyncIterable, AsyncGenerator, Callable
 
 from claude_agent_sdk import query, AssistantMessage, ResultMessage, StreamEvent
 
+from src.config import settings
 from src.agent.prompts import ORCHESTRATOR_SYSTEM_PROMPT
 from src.agent.sdk.servers import build_orchestrator_server, make_options
 from src.agent.sdk.worker import run_worker, MAX_ITER_SENTINEL
 
 logger = logging.getLogger(__name__)
 
-ORCHESTRATOR_MODEL = "claude-sonnet-4-6"
-ESCALATION_MODEL = "claude-sonnet-4-6"
+ORCHESTRATOR_MODEL = settings.orchestrator_model
+ESCALATION_MODEL = settings.escalation_model
 ORCHESTRATOR_MAX_TURNS = 20
 
 # When a worker reports NO_RESULTS, retry the task with this alternate worker.
@@ -76,6 +77,10 @@ class Delegator:
                 if use_fallback:
                     self._fallbacks_used.add(agent)
             if use_fallback:
+                self.emit({"type": "tool_call", "agent": "orchestrator",
+                           "tool": "delegate", "args": {"agent": alternate, "task": task},
+                           "result": f"(automatic fallback from {agent} — running {alternate}…)",
+                           "is_error": False})
                 alternate_result = await run_worker(
                     alternate, task, self.descriptor, self.emit
                 )
@@ -89,9 +94,21 @@ class Delegator:
                 if use_escalation:
                     self._escalations_used.add(agent)
             if use_escalation:
+                self.emit({"type": "tool_call", "agent": "orchestrator",
+                           "tool": "delegate", "args": {"agent": agent, "task": task},
+                           "result": f"(escalating {agent} to {ESCALATION_MODEL}…)",
+                           "is_error": False})
                 escalated = await run_worker(
                     agent, task, self.descriptor, self.emit, model=ESCALATION_MODEL
                 )
+                # Measure whether escalation ever changes the outcome — if this
+                # only ever logs 'still-empty', the double-NO_RESULTS trigger
+                # is wasted spend and can be dropped.
+                still_empty = _is_capability_failure(escalated) or \
+                    escalated.lstrip().startswith(NO_RESULTS_TOKEN)
+                logger.info("[escalation] agent=%s model=%s outcome=%s",
+                            agent, ESCALATION_MODEL,
+                            "still-empty" if still_empty else "produced-answer")
 
         if alternate_result is None and escalated is None:
             return result
@@ -116,9 +133,6 @@ class Delegator:
         return False
 
 
-WORKER_NAMES = {"database_agent", "text_search_agent", "visual_search_agent"}
-
-
 def _text_delta(msg: StreamEvent) -> str | None:
     ev = getattr(msg, "event", None)
     if not isinstance(ev, dict) or ev.get("type") != "content_block_delta":
@@ -132,6 +146,8 @@ def _text_delta(msg: StreamEvent) -> str | None:
 async def run_orchestrator_events(
     descriptor,
     prompt_input: str | AsyncIterable[dict],
+    *,
+    resume: str | None = None,
 ) -> AsyncGenerator[dict, None]:
     """Drive the orchestrator query() and yield one ordered event stream:
       {"type":"content","content": str}
@@ -140,6 +156,7 @@ async def run_orchestrator_events(
       {"type":"action", ...}
       {"type":"error","error": str}
       {"type":"notice","text": str}      (max turns / non-success result)
+      {"type":"session","session_id": str}   (for multi-turn resume)
     """
     queue: asyncio.Queue = asyncio.Queue()
 
@@ -153,6 +170,7 @@ async def run_orchestrator_events(
         system_prompt=ORCHESTRATOR_SYSTEM_PROMPT,
         model=ORCHESTRATOR_MODEL, max_turns=ORCHESTRATOR_MAX_TURNS,
         include_partial_messages=True,
+        resume=resume,
     )
 
     async def drive() -> None:
@@ -165,6 +183,12 @@ async def run_orchestrator_events(
                         streamed.append(text)
                         emit({"type": "content", "content": text})
                 elif isinstance(msg, ResultMessage):
+                    logger.info(
+                        "[orchestrator] subtype=%s turns=%s duration_ms=%s cost_usd=%s",
+                        msg.subtype, msg.num_turns, msg.duration_ms, msg.total_cost_usd,
+                    )
+                    if msg.session_id:
+                        emit({"type": "session", "session_id": msg.session_id})
                     if msg.subtype == "success":
                         # Text was already streamed via deltas; only emit the
                         # result if nothing streamed (defensive — no double text).

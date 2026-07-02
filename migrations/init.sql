@@ -50,6 +50,7 @@ ON document_chunks USING vchordrq (embedding vector_cosine_ops);
 CREATE TABLE IF NOT EXISTS conversations (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     title VARCHAR(500),
+    sdk_session_id VARCHAR(64),
     created_at TIMESTAMP DEFAULT NOW(),
     updated_at TIMESTAMP DEFAULT NOW()
 );

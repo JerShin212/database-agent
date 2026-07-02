@@ -19,6 +19,12 @@ class Settings(BaseSettings):
     # LLM APIs
     anthropic_api_key: str = ""
 
+    # Agent models (Claude Agent SDK). Workers run cheap/fast; the orchestrator
+    # synthesizes; escalation_model retries a worker that failed on the cheap model.
+    orchestrator_model: str = "claude-sonnet-4-6"
+    worker_model: str = "claude-haiku-4-5-20251001"
+    escalation_model: str = "claude-sonnet-4-6"
+
     # Encryption
     encryption_key: str = ""  # Fernet key for encrypting connection strings
 

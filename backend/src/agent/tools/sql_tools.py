@@ -132,7 +132,10 @@ def _execute_sql_sqlite(sql: str, context) -> str:
         return f"Error: {result.error}"
 
     if not result.rows:
-        return "NO_RESULTS: Query returned no results."
+        # NOT prefixed NO_RESULTS: a zero-row result is a valid answer ("no
+        # orders from Janet"), not a signal that the data lives elsewhere.
+        return ("Query executed successfully — 0 rows matched. If the query is "
+                "correct, report the zero result as the answer.")
 
     # Format as table
     lines = []
@@ -165,7 +168,8 @@ def _execute_sql_connector(sql: str, connector_id: UUID, context) -> str:
         result = db_connector.execute_query(sql, limit=1000)
 
         if not result["rows"]:
-            return "NO_RESULTS: Query returned no results."
+            return ("Query executed successfully — 0 rows matched. If the query is "
+                    "correct, report the zero result as the answer.")
 
         # Format as table
         lines = []

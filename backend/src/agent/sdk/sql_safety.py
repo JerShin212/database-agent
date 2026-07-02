@@ -52,7 +52,10 @@ def validate_sql(sql: str) -> tuple[bool, str]:
 
     # 2. No comments — they are a classic way to smuggle past keyword checks.
     if "--" in stripped or "/*" in stripped or "*/" in stripped:
-        return False, "SQL comments are not allowed"
+        return False, (
+            "SQL comments are not allowed (this also rejects '--' or '/*' inside "
+            "string literals — rewrite the query without those character sequences)"
+        )
 
     # 3. No statement stacking. A single trailing ';' is tolerated and stripped.
     body = stripped.rstrip().rstrip(";").strip()
@@ -93,6 +96,10 @@ def ensure_limit(sql: str, limit: int = _DEFAULT_ROW_LIMIT) -> str:
     Assumes validate_sql() already passed (no trailing ';', no comments), so the
     subquery wrap is safe. Immune to `LIMIT ALL` / `LIMIT $var` bypasses because
     the outer LIMIT is a literal we control.
+
+    Note: the SQL standard does not guarantee that an inner ORDER BY survives a
+    subquery wrap, but SQLite, PostgreSQL and MySQL all preserve it in practice
+    when the outer query is a bare SELECT * ... LIMIT.
     """
     inner = sql.strip().rstrip(";").strip()
     try:

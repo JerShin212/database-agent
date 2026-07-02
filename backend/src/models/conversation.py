@@ -11,6 +11,9 @@ class Conversation(Base):
 
     id: UUID = Column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
     title: Optional[str] = Column(String(500), nullable=True)
+    # Claude Agent SDK session id of the last completed turn — lets the next
+    # turn resume the CLI session instead of replaying history as text.
+    sdk_session_id: Optional[str] = Column(String(64), nullable=True)
     created_at: datetime = Column(DateTime, default=datetime.utcnow)
     updated_at: datetime = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

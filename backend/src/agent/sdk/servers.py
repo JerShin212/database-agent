@@ -65,8 +65,22 @@ LOCKDOWN: dict[str, Any] = {
 _READONLY = ToolAnnotations(readOnlyHint=True)
 
 # Row cap enforced on every model-written SQL query, independent of any LIMIT
-# the model did or didn't write.
-_SQL_ROW_CAP = 1000
+# the model did or didn't write. Kept close to what the tool actually renders
+# back to the model (50 rows) so we don't fetch hundreds of rows it never sees.
+_SQL_ROW_CAP = 100
+
+
+def _query_schema(query_desc: str) -> dict[str, Any]:
+    """JSON Schema for the common (query, limit?) search-tool signature."""
+    return {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": query_desc},
+            "limit": {"type": "integer", "description": "Max results to return.",
+                      "default": 5, "minimum": 1, "maximum": 20},
+        },
+        "required": ["query"],
+    }
 
 
 def _result(text: str | None, is_error: bool | None = None) -> dict[str, Any]:
@@ -142,9 +156,11 @@ def build_database_server(descriptor):
 
     @tool("search_schema_catalog",
           "Semantic search over the schema catalog (keyword + embedding + value "
-          "match, RRF + MaxSim). Returns matched tables/columns with JOIN hints. "
-          "Params: query (string); optional limit (int, default 5).",
-          {"query": str}, annotations=_READONLY)
+          "match, RRF + MaxSim). Returns matched tables/columns with JOIN hints.",
+          _query_schema("Natural-language phrase describing the data you need; "
+                        "include literal values from the question (names, emails, "
+                        "statuses) so value-matching can find their columns."),
+          annotations=_READONLY)
     async def _search_schema_catalog(args):
         limit = int(args.get("limit", 5) or 5)
         return await _run(search_schema_catalog, args["query"], descriptor, None, limit)
@@ -170,18 +186,30 @@ DOC_TOOL_NAMES = [
 
 def build_doc_server(descriptor):
     @tool("search_collections",
-          "Hybrid search (BM25 + semantic, RRF) over document collections. "
-          "Params: query (string); optional limit (int, default 5).",
-          {"query": str}, annotations=_READONLY)
+          "Hybrid search (BM25 + semantic, RRF) over document collections.",
+          _query_schema("Descriptive natural-language search query — focus on "
+                        "the concept, not just keywords."),
+          annotations=_READONLY)
     async def _search_collections(args):
         limit = int(args.get("limit", 5) or 5)
         return await _run(search_collections, args["query"], descriptor, None, limit)
 
     @tool("read_document",
-          "Read a document's extracted text (paginated). Params: filename "
-          "(partial match ok); optional start_char (int), length (int, default "
-          "15000, max 20000).",
-          {"filename": str}, annotations=_READONLY)
+          "Read a document's extracted text (paginated). The response header "
+          "tells you the start_char for the next page.",
+          {
+              "type": "object",
+              "properties": {
+                  "filename": {"type": "string",
+                               "description": "Document filename (partial match ok)."},
+                  "start_char": {"type": "integer", "default": 0, "minimum": 0,
+                                 "description": "Character offset to start reading from."},
+                  "length": {"type": "integer", "default": 15000,
+                             "minimum": 1, "maximum": 20000,
+                             "description": "Number of characters to return."},
+              },
+              "required": ["filename"],
+          }, annotations=_READONLY)
     async def _read_document(args):
         start_char = int(args.get("start_char", 0) or 0)
         length = int(args.get("length", 15000) or 15000)
@@ -213,17 +241,29 @@ VISUAL_TOOL_NAMES = [
 def build_visual_server(descriptor):
     @tool("search_visual_documents",
           "Visual page search via ColQwen2 (diagrams, figures, schematics, "
-          "complex tables). Params: query (string); optional limit (int, default 5).",
-          {"query": str}, annotations=_READONLY)
+          "complex tables).",
+          _query_schema("Phrase describing what the visual content looks like, "
+                        "e.g. 'wiring diagram for unit A'."),
+          annotations=_READONLY)
     async def _search_visual_documents(args):
         limit = int(args.get("limit", 5) or 5)
         return await _run(search_visual_documents, args["query"], descriptor, None, limit)
 
     @tool("search_by_image",
           "Search document pages using the image the user attached to their "
-          "message. Optional text_query (string) fuses a text search with the "
-          "image search; optional limit (int, default 5).",
-          {}, annotations=_READONLY)
+          "message.",
+          {
+              "type": "object",
+              "properties": {
+                  "text_query": {"type": "string",
+                                 "description": "Short description of the image; "
+                                 "fuses a text search with the image search for "
+                                 "better results."},
+                  "limit": {"type": "integer", "default": 5,
+                            "minimum": 1, "maximum": 20,
+                            "description": "Max results to return."},
+              },
+          }, annotations=_READONLY)
     async def _search_by_image(args):
         text_query = args.get("text_query")
         limit = int(args.get("limit", 5) or 5)
@@ -294,6 +334,11 @@ def build_orchestrator_server(
           _DELEGATE_SCHEMA)
     async def _delegate(args):
         agent, task = args["agent"], args["task"]
+        # Emit before running so the UI shows the delegation ahead of the
+        # worker tool calls it produces; the completion event carries the result.
+        emit({"type": "tool_call", "agent": "orchestrator", "tool": "delegate",
+              "args": {"agent": agent, "task": task},
+              "result": f"(running {agent}…)", "is_error": False})
         result = await delegate_fn(agent, task)
         emit({"type": "tool_call", "agent": "orchestrator", "tool": "delegate",
               "args": {"agent": agent, "task": task}, "result": (result or "")[:500],
@@ -317,9 +362,19 @@ def build_orchestrator_server(
         return _result(text, is_error=not ok)
 
     @tool("suggest_form",
-          "Suggest a relevant form for the user to fill as their next action. "
-          "Param: form_id; optional prefill (object of known field values).",
-          {"form_id": str})
+          "Suggest a relevant form for the user to fill as their next action.",
+          {
+              "type": "object",
+              "properties": {
+                  "form_id": {"type": "string",
+                              "description": "Id of the form from the catalog."},
+                  "prefill": {"type": "object", "additionalProperties": True,
+                              "description": "Field values you already know from "
+                              "the conversation or worker results, keyed by field "
+                              "name."},
+              },
+              "required": ["form_id"],
+          })
     async def _suggest_form(args):
         form_id = args.get("form_id", "")
         prefill = args.get("prefill") or {}
@@ -344,8 +399,12 @@ def build_orchestrator_server(
 
 
 def make_options(*, server, tool_names, system_prompt, model, max_turns,
-                 include_partial_messages=False) -> ClaudeAgentOptions:
-    """Build a locked-down ClaudeAgentOptions for one agent's query()."""
+                 include_partial_messages=False, resume=None) -> ClaudeAgentOptions:
+    """Build a locked-down ClaudeAgentOptions for one agent's query().
+
+    `resume` continues a prior CLI session (multi-turn conversations) — the
+    session transcript lives on the container's disk, so callers must handle a
+    failed resume (see framework.chat's retry-without-resume)."""
     server_name = tool_names[0].split("__")[1]  # mcp__<name>__<tool>
     return ClaudeAgentOptions(
         model=model,
@@ -354,5 +413,6 @@ def make_options(*, server, tool_names, system_prompt, model, max_turns,
         allowed_tools=tool_names,
         max_turns=max_turns,
         include_partial_messages=include_partial_messages,
+        resume=resume,
         **LOCKDOWN,
     )

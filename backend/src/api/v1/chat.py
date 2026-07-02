@@ -22,6 +22,8 @@ async def chat(
     conversation_id = None
     content = ""
     tool_calls = []
+    charts = []
+    actions = []
     error = None
 
     async for chunk in agent_framework.chat(
@@ -44,6 +46,10 @@ async def chat(
                 "args": chunk.get("args", {}),
                 "result": chunk.get("result", ""),
             })
+        elif chunk_type == "chart":
+            charts.append(chunk.get("spec"))
+        elif chunk_type == "action":
+            actions.append({k: v for k, v in chunk.items() if k != "type"})
         elif chunk_type == "error":
             error = chunk.get("error")
 
@@ -51,6 +57,8 @@ async def chat(
         "conversation_id": conversation_id,
         "content": content,
         "tool_calls": tool_calls,
+        "charts": charts,
+        "actions": actions,
         "error": error,
     }
 
