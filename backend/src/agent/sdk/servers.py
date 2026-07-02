@@ -48,6 +48,7 @@ from src.agent.tools.form_tools import (
     suggest_form,
 )
 from src.agent.sdk.sql_safety import validate_sql, ensure_limit
+from src.services.mlflow_tracing import SpanType, span as tspan
 
 # ---------------------------------------------------------------------------
 # Permission lockdown — applied to EVERY query() (orchestrator + workers).
@@ -102,12 +103,25 @@ def _result(text: str | None, is_error: bool | None = None) -> dict[str, Any]:
 
 async def _run(fn: Callable[..., str], *args: Any, **kwargs: Any) -> dict[str, Any]:
     """Run a blocking (DB / Modal HTTP) tool function off the event loop and wrap
-    its string result. Keeps concurrent requests from blocking on one tool."""
-    try:
-        text = await asyncio.to_thread(fn, *args, **kwargs)
-    except Exception as exc:  # backstop — tools already catch their own errors
-        return _result(f"[Tool error] {exc}", is_error=True)
-    return _result(text)
+    its string result. Keeps concurrent requests from blocking on one tool.
+
+    Also opens the tool's MLflow span here — the async layer — because trace
+    context does not propagate into the to_thread worker thread. Scalar args
+    only in span inputs (skips descriptor objects / image bytes)."""
+    with tspan(f"tool:{fn.__name__}", span_type=SpanType.TOOL) as s:
+        if s:
+            s.set_inputs({"args": [a for a in args if isinstance(a, (str, int, float))]})
+        try:
+            text = await asyncio.to_thread(fn, *args, **kwargs)
+        except Exception as exc:  # backstop — tools already catch their own errors
+            if s:
+                s.set_outputs({"result": f"[Tool error] {exc}", "is_error": True})
+            return _result(f"[Tool error] {exc}", is_error=True)
+        wrapped = _result(text)
+        if s:
+            s.set_outputs({"result": (text or "")[:2000],
+                           "is_error": wrapped["is_error"]})
+        return wrapped
 
 
 # ===========================================================================
@@ -339,7 +353,14 @@ def build_orchestrator_server(
         emit({"type": "tool_call", "agent": "orchestrator", "tool": "delegate",
               "args": {"agent": agent, "task": task},
               "result": f"(running {agent}…)", "is_error": False})
-        result = await delegate_fn(agent, task)
+        # Worker (and fallback/escalation) spans opened inside delegate_fn
+        # auto-nest under this span.
+        with tspan("tool:delegate", span_type=SpanType.TOOL) as s:
+            if s:
+                s.set_inputs({"agent": agent, "task": task[:2000]})
+            result = await delegate_fn(agent, task)
+            if s:
+                s.set_outputs({"result": (result or "")[:2000]})
         emit({"type": "tool_call", "agent": "orchestrator", "tool": "delegate",
               "args": {"agent": agent, "task": task}, "result": (result or "")[:500],
               "is_error": False})
@@ -350,11 +371,16 @@ def build_orchestrator_server(
           "numbers, e.g. from database_agent). chart_type: bar|line|pie|scatter.",
           _CHART_SCHEMA)
     async def _create_chart(args):
-        text = create_chart(
-            args.get("chart_type"), args.get("title"),
-            args.get("labels"), args.get("datasets"),
-        )
-        ok = text.startswith(CHART_SUCCESS_PREFIX)
+        with tspan("tool:create_chart", span_type=SpanType.TOOL) as s:
+            if s:
+                s.set_inputs(args)
+            text = create_chart(
+                args.get("chart_type"), args.get("title"),
+                args.get("labels"), args.get("datasets"),
+            )
+            ok = text.startswith(CHART_SUCCESS_PREFIX)
+            if s:
+                s.set_outputs({"result": text[:2000], "is_error": not ok})
         emit({"type": "tool_call", "agent": "orchestrator", "tool": "create_chart",
               "args": args, "result": text[:500], "is_error": not ok})
         if ok:
@@ -378,8 +404,13 @@ def build_orchestrator_server(
     async def _suggest_form(args):
         form_id = args.get("form_id", "")
         prefill = args.get("prefill") or {}
-        text = suggest_form(form_id, prefill)
-        ok = text.startswith(FORM_SUGGESTION_PREFIX)
+        with tspan("tool:suggest_form", span_type=SpanType.TOOL) as s:
+            if s:
+                s.set_inputs({"form_id": form_id, "prefill": prefill})
+            text = suggest_form(form_id, prefill)
+            ok = text.startswith(FORM_SUGGESTION_PREFIX)
+            if s:
+                s.set_outputs({"result": text[:2000], "is_error": not ok})
         emit({"type": "tool_call", "agent": "orchestrator", "tool": "suggest_form",
               "args": args, "result": text[:500], "is_error": not ok})
         if ok:

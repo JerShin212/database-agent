@@ -29,6 +29,12 @@ from src.config import settings
 from src.agent.prompts import ORCHESTRATOR_SYSTEM_PROMPT
 from src.agent.sdk.servers import build_orchestrator_server, make_options
 from src.agent.sdk.worker import run_worker, MAX_ITER_SENTINEL
+from src.services.mlflow_tracing import (
+    SpanType,
+    attach_usage as _attach_usage,
+    span as tspan,
+    trace_metadata,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -176,29 +182,46 @@ async def run_orchestrator_events(
     async def drive() -> None:
         streamed: list[str] = []
         try:
-            async for msg in query(prompt=prompt_input, options=options):
-                if isinstance(msg, StreamEvent):
-                    text = _text_delta(msg)
-                    if text:
-                        streamed.append(text)
-                        emit({"type": "content", "content": text})
-                elif isinstance(msg, ResultMessage):
-                    logger.info(
-                        "[orchestrator] subtype=%s turns=%s duration_ms=%s cost_usd=%s",
-                        msg.subtype, msg.num_turns, msg.duration_ms, msg.total_cost_usd,
-                    )
-                    if msg.session_id:
-                        emit({"type": "session", "session_id": msg.session_id})
-                    if msg.subtype == "success":
-                        # Text was already streamed via deltas; only emit the
-                        # result if nothing streamed (defensive — no double text).
-                        if not "".join(streamed).strip() and (msg.result or "").strip():
-                            emit({"type": "content", "content": msg.result})
-                    else:
-                        emit({"type": "notice", "text": (
-                            "\n\nI couldn't fully complete this within my step "
-                            "limit — here's what I found so far."
-                        )})
+            # One MLflow trace per orchestrator run; tool/worker spans opened in
+            # the SDK's handler tasks auto-nest under this root via contextvars.
+            with tspan("orchestrator", span_type=SpanType.AGENT) as root:
+                if root:
+                    root.set_inputs({"message": (
+                        prompt_input[:2000] if isinstance(prompt_input, str)
+                        else "[streaming input with image]"
+                    )})
+                    root.set_attributes({
+                        "llm.model": ORCHESTRATOR_MODEL,
+                        "resume": bool(resume),
+                    })
+                    trace_metadata(session=descriptor.conversation_id)
+                async for msg in query(prompt=prompt_input, options=options):
+                    if isinstance(msg, StreamEvent):
+                        text = _text_delta(msg)
+                        if text:
+                            streamed.append(text)
+                            emit({"type": "content", "content": text})
+                    elif isinstance(msg, ResultMessage):
+                        logger.info(
+                            "[orchestrator] subtype=%s turns=%s duration_ms=%s cost_usd=%s",
+                            msg.subtype, msg.num_turns, msg.duration_ms, msg.total_cost_usd,
+                        )
+                        if root:
+                            _attach_usage(root, msg, model=ORCHESTRATOR_MODEL)
+                        if msg.session_id:
+                            emit({"type": "session", "session_id": msg.session_id})
+                        if msg.subtype == "success":
+                            # Text was already streamed via deltas; only emit the
+                            # result if nothing streamed (defensive — no double text).
+                            if not "".join(streamed).strip() and (msg.result or "").strip():
+                                emit({"type": "content", "content": msg.result})
+                        else:
+                            emit({"type": "notice", "text": (
+                                "\n\nI couldn't fully complete this within my step "
+                                "limit — here's what I found so far."
+                            )})
+                if root:
+                    root.set_outputs({"response": "".join(streamed)[:10000]})
         except Exception as exc:
             logger.error("[orchestrator] %s", exc, exc_info=True)
             emit({"type": "error", "error": str(exc)})

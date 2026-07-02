@@ -39,6 +39,33 @@ services:
       timeout: 20s
       retries: 3
 
+  # MLflow tracking server — agent observability (traces/spans).
+  # SQLite-backed on its own volume; UI on http://localhost:5001 (5000 is
+  # taken by macOS AirPlay). The backend runs fine when this is down —
+  # tracing no-ops until it recovers.
+  mlflow:
+    image: python:3.12-slim
+    container_name: db-agent-mlflow
+    ports:
+      - "5001:5000"
+    volumes:
+      - mlflow_data:/mlflow
+    command: >
+      /bin/sh -c "
+      pip install --no-cache-dir 'mlflow>=3.1' &&
+      mlflow server
+      --host 0.0.0.0 --port 5000
+      --backend-store-uri sqlite:////mlflow/mlflow.db
+      --artifacts-destination /mlflow/artifacts
+      --allowed-hosts '*'
+      "
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:5000/health')\""]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 120s
+
   # FastAPI Backend
   backend:
     build:
@@ -57,6 +84,10 @@ services:
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - ENCRYPTION_KEY=${ENCRYPTION_KEY}
       - SQLITE_DATA_PATH=/app/data/sqlite
+      # Agent tracing (no depends_on: mlflow — tracing is non-fatal by design
+      # and the mlflow container pip-installs at boot, ~1min on first start)
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
+      - MLFLOW_EXPERIMENT=database-agent
     ports:
       - "8001:8001"
     volumes:
@@ -87,3 +118,4 @@ volumes:
   postgres_data:
   minio_data:
   sqlite_data:
+  mlflow_data:

@@ -139,6 +139,9 @@ class DatabaseAgentFramework:
             conversation_id = conversation.id
 
         yield {"type": "metadata", "conversation_id": str(conversation_id)}
+        # Now that the conversation exists, bind its id into the descriptor so
+        # the orchestrator's root span can group traces by conversation.
+        descriptor.conversation_id = conversation_id
 
         # --- 4. Load conversation history ---
         result = await db.execute(

@@ -16,6 +16,8 @@ from uuid import UUID
 
 @dataclass
 class Descriptor:
+    # For observability only (mlflow.trace.session grouping) — tools don't read it.
+    conversation_id: UUID | None = None
     database_id: UUID | None = None
     database_path: Path | None = None
     database_name: str | None = None

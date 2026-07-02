@@ -32,6 +32,9 @@ dependencies = [
     "claude-agent-sdk>=0.2.110",  # in-process MCP tool servers + query() agent loop (needs the `claude` CLI on PATH)
     "numpy>=1.26.0",
 
+    # Observability — agent trace spans exported to the self-hosted MLflow server
+    "mlflow>=3.1",
+
     # Utilities
     "pydantic>=2.9.0",
     "pydantic-settings>=2.5.0",

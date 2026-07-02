@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 
 from src.config import settings
 from src.db.database import init_db
+from src.services.mlflow_tracing import flush_traces, init_mlflow, stop_health_probe
 from src.api.v1 import chat, collections, connectors, databases, forms, integrations, schema
 
 
@@ -17,10 +18,13 @@ async def lifespan(app: FastAPI):
     # environment — set it once here, not per request.
     if settings.anthropic_api_key:
         os.environ["ANTHROPIC_API_KEY"] = settings.anthropic_api_key
+    init_mlflow()  # non-fatal — the app runs fine without the MLflow server
     await init_db()
     print("Database initialized")
     yield
     # Shutdown
+    stop_health_probe()
+    flush_traces()  # async trace export is batched — drain before exit
     print("Shutting down...")
 
 

@@ -38,6 +38,7 @@ from src.agent.sdk.servers import (
     build_visual_server,
     make_options,
 )
+from src.services.mlflow_tracing import SpanType, attach_usage, span as tspan
 
 logger = logging.getLogger(__name__)
 
@@ -94,32 +95,43 @@ async def run_worker(
 
     pending: dict[str, dict] = {}  # tool_use_id -> {tool, args}
     final = ""
-    try:
-        async for msg in query(prompt=task, options=options):
-            if isinstance(msg, AssistantMessage):
-                for block in msg.content:
-                    if isinstance(block, ToolUseBlock):
-                        pending[block.id] = {"tool": _short_tool(block.name),
-                                             "args": block.input}
-            elif isinstance(msg, UserMessage):
-                content = msg.content if isinstance(msg.content, list) else []
-                for block in content:
-                    if isinstance(block, ToolResultBlock):
-                        info = pending.pop(block.tool_use_id, {"tool": "?", "args": {}})
-                        text = _result_text(block.content)
-                        emit({"type": "tool_call", "agent": name,
-                              "tool": info["tool"], "args": info["args"],
-                              "result": text[:500], "is_error": bool(block.is_error)})
-            elif isinstance(msg, ResultMessage):
-                logger.info(
-                    "[worker:%s] model=%s subtype=%s turns=%s duration_ms=%s cost_usd=%s",
-                    name, model or WORKER_MODEL, msg.subtype, msg.num_turns,
-                    msg.duration_ms, msg.total_cost_usd,
-                )
-                if msg.subtype == "success":
-                    final = msg.result or ""
-    except Exception as exc:
-        logger.error("[run_worker:%s] %s", name, exc, exc_info=True)
-        return f"[Worker {name} failed: {exc}]"
+    with tspan(f"worker:{name}", span_type=SpanType.AGENT) as wspan:
+        if wspan:
+            wspan.set_inputs({"task": task[:2000]})
+            wspan.set_attributes({"llm.model": model or WORKER_MODEL})
+        try:
+            async for msg in query(prompt=task, options=options):
+                if isinstance(msg, AssistantMessage):
+                    for block in msg.content:
+                        if isinstance(block, ToolUseBlock):
+                            pending[block.id] = {"tool": _short_tool(block.name),
+                                                 "args": block.input}
+                elif isinstance(msg, UserMessage):
+                    content = msg.content if isinstance(msg.content, list) else []
+                    for block in content:
+                        if isinstance(block, ToolResultBlock):
+                            info = pending.pop(block.tool_use_id, {"tool": "?", "args": {}})
+                            text = _result_text(block.content)
+                            emit({"type": "tool_call", "agent": name,
+                                  "tool": info["tool"], "args": info["args"],
+                                  "result": text[:500], "is_error": bool(block.is_error)})
+                elif isinstance(msg, ResultMessage):
+                    logger.info(
+                        "[worker:%s] model=%s subtype=%s turns=%s duration_ms=%s cost_usd=%s",
+                        name, model or WORKER_MODEL, msg.subtype, msg.num_turns,
+                        msg.duration_ms, msg.total_cost_usd,
+                    )
+                    attach_usage(wspan, msg, model=model or WORKER_MODEL)
+                    if msg.subtype == "success":
+                        final = msg.result or ""
+        except Exception as exc:
+            logger.error("[run_worker:%s] %s", name, exc, exc_info=True)
+            failure = f"[Worker {name} failed: {exc}]"
+            if wspan:
+                wspan.set_outputs({"result": failure})
+            return failure
 
-    return final if final else MAX_ITER_SENTINEL
+        result = final if final else MAX_ITER_SENTINEL
+        if wspan:
+            wspan.set_outputs({"result": result[:2000]})
+        return result
